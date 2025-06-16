@@ -1,0 +1,90 @@
+BALANCE SHEET
+
+ASSETS: 
+Cash and equivalents
+Accounts Receivable
+Prepaid Expenses
+Inventory
+Investments
+Other
+Total Current Assets
+
+Net PPE
+Goodwill
+Intangibles
+Other
+
+Total Non Current Assets
+Total Assets
+
+LIABILITIES:
+Accounts Payable
+Accrued Interest
+Short term Borrowing
+Current Portion of Long Term Debt
+Other
+Total Current Liabilities
+
+Long Term Debt
+Deferred income taxes
+Other
+
+Total Non Current Liabilities
+Total Liabilities
+
+EQUITY:
+Common Stock
+Retained Earnings
+Paid in Capital
+Other
+Total Equity
+
+Total Liabilities and Equity
+
+
+------
+
+INCOME STATEMENT
+
+Revenue
+Operating Expenses
+Operating Income
+
+Depreciation (-)
+Amortization (-)
+Asses gain(loss) impairments
+Interest Expense (-)
+Interest Income (+)
+Other income(expenses)
+
+Income Before Taxes
+Tax expense
+Other
+Net Income
+
+------
+
+STATEMENT OF CASH FLOW
+Operating Activities
+Net Income
+Changes in noncash items
+Changes in Asses and Liabilities
+Net Cash from(used) Operating Activities
+
+Investing Activities
+CapEx
+Proceeds from asset sales
+Others
+Net cash from(used) for investing 
+
+Financing Activities
+Issuance of Debt (long+short term)
+Retirement of Debt (long+short term)
+Issuance of Stock
+Dividends Paid
+Other
+Net cash from(used) for financing
+
+Net change in Cash
+Starting Cash
+Ending Cash

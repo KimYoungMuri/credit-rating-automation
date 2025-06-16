@@ -1,0 +1,38 @@
+Archer Daniels Midland Company
+American Electric Power
+American Powernet Management
+BP
+Clearview
+DTE
+East Kentucky Power Cooperative
+Freepoint Commodities LLC
+Green Trading Capital
+Kern Oil
+Marathon Petroleum Company
+Phillips 66
+Pacific Gas and Electric
+Shipley Choice LLC
+The Energy Authority
+US Venture
+
+'''''''''
+
+[Public Companies]
+Archer Daniels Midland Company (ADM)
+American Electric Power (AEP)
+BP
+DTE Energy
+Marathon Petroleum Company
+Phillips 66
+Pacific Gas and Electric (PG&E)
+
+[Private / Not-for-Profit Companies]
+American PowerNet Management --> need 2023/2024
+Clearview Energy --> need 2024
+East Kentucky Power Cooperative --> need 2022/2023/2024
+Freepoint Commodities LLC --> need 2023/2024
+Green Trading Capital --> need 2020/2021/2023/2024
+Kern Oil --> need 2020/2024
+Shipley Choice LLC --> need 2021/2022/2023/2024
+The Energy Authority --> need 2024
+US Venture --> need 2022/2023/2024

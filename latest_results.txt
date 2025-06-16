@@ -1,0 +1,86 @@
+Template Mapping Results
+================================================================================
+
+Balance Sheet:
+----------------------------------------
+
+Assets:
+  Cash and equivalents: 9327.0
+  Accounts Receivable: nan
+  Prepaid Expenses: Not found
+  Inventory: 1100823.0
+  Investments: 110997.0
+  Other current assets: 121084.0
+  Total Current Assets: 1962925.0
+  Net PPE: 329986.0
+  Goodwill: 359998.0
+  Intangibles: nan
+  Other non-current assets: 58375.0
+  Total Non Current Assets: 3371842.0
+  Total Assets: 1409918.0
+
+Liabilities:
+  Accounts Payable: 962675.0
+  Accrued Interest: Not found
+  Short term Borrowing: Not found
+  Current Portion of Long Term Debt: 171780.0
+  Other current liabilities: 196840.0
+  Total Current Liabilities: 3371842.0
+  Long Term Debt: 33841.0
+  Deferred income taxes: Not found
+  Other non-current liabilities: Not found
+  Total Non Current Liabilities: Not found
+  Total Liabilities: 2986939.0
+
+Equity:
+  Common Stock: Not found
+  Retained Earnings: Not found
+  Paid in Capital: Not found
+  Other equity: Not found
+  Total Equity: Not found
+  Total Liabilities and Equity: nan
+
+Income Statement:
+----------------------------------------
+  Revenue: Not found
+  Operating Expenses: Not found
+  Operating Income: Not found
+  Depreciation: Not found
+  Amortization: Not found
+  Asset gain(loss) impairments: nan
+  Interest Expense: Not found
+  Interest Income: Not found
+  Other income(expenses): Not found
+  Income Before Taxes: Not found
+  Tax expense: Not found
+  Other items: Not found
+  Net Income: Not found
+
+Cash Flow Statement:
+----------------------------------------
+
+Operating Activities:
+  Operating Activities: nan
+  Net Income: 119074.0
+  Changes in noncash items: 149852.0
+  Changes in Assets and Liabilities: nan
+  Net Cash from(used) Operating Activities: Not found
+
+Investing Activities:
+  Investing Activities: nan
+  CapEx: Not found
+  Proceeds from asset sales: Not found
+  Other investing items: Not found
+  Net cash from(used) for investing: Not found
+
+Financing Activities:
+  Financing Activities: nan
+  Issuance of Debt: 18703.0
+  Retirement of Debt: -44475.0
+  Issuance of Stock: Not found
+  Dividends Paid: -29320.0
+  Other financing items: Not found
+  Net cash from(used) for financing: Not found
+  Net change in Cash: 7662.0
+  Starting Cash: 10551.0
+  Ending Cash: 9327.0

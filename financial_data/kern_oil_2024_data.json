@@ -1,0 +1,51 @@
+{
+    "balance_sheet": {
+        "Cash and equivalents": [
+            35626.0,
+            72127.0
+        ],
+        "Accounts Receivable": [
+            48893.0,
+            58538.0
+        ],
+        "Prepaid Expenses": [
+            -6402.0
+        ],
+        "Accounts Payable": [
+            65102.0,
+            74182.0
+        ],
+        "Paid in Capital": [
+            10578.0
+        ],
+        "Retained Earnings": [
+            115182.0,
+            137972.0
+        ],
+        "Common Stock": [
+            21088.0,
+            16104.0
+        ],
+        "Total Current Assets": [
+            78117.0,
+            130665.0
+        ],
+        "Total Current Liabilities": [
+            65102.0,
+            74182.0
+        ],
+        "Total Equity": [
+            146848.0,
+            154076.0
+        ]
+    },
+    "income_statement": {
+        "Depreciation (-)": [
+            -0.0
+        ],
+        "Net Income": [
+            23325.0
+        ]
+    },
+    "cash_flow": {}
+}
