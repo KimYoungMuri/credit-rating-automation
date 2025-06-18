@@ -9,20 +9,35 @@ import sys
 import numpy as np
 import pandas as pd
 from datetime import datetime
+from final_template_mapper import TemplateMatcher
 
 class TextExtractor: 
     def __init__(self):
         self.setup_logging()
         self.finder = FinancialStatementFinder()
-        self.output_dir = Path("output_excel")
+        
+        # Get project root directory (two levels up from this file)
+        current_dir = Path(__file__).resolve().parent
+        project_root = current_dir.parent.parent
+        
+        # Set up output directory relative to project root
+        self.output_dir = project_root / "output_excel"
         self.output_dir.mkdir(exist_ok=True)
+        
+        print("Debug log file created")
+        print(f"Output directory created/verified: {self.output_dir}")
 
     def setup_logging(self):
         """Setup logging configuration"""
+        # Get project root directory for log file
+        current_dir = Path(__file__).resolve().parent
+        project_root = current_dir.parent.parent
+        log_file = project_root / "text_extraction.log"
+        
         for handler in logging.root.handlers[:]:
             logging.root.removeHandler(handler)
         formatter = logging.Formatter('%(message)s')
-        file_handler = logging.FileHandler('text_extraction.log', mode='w', encoding='utf-8')
+        file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
         file_handler.setFormatter(formatter)
         logging.root.addHandler(file_handler)
         logging.root.setLevel(logging.INFO)
@@ -106,29 +121,23 @@ class TextExtractor:
 
     def process_numbers(self, lines: List[List[dict]], number_zone: Tuple[float, float] = None) -> List[str]:
         processed_lines = []
-        
         if number_zone:
             number_zone_start, number_zone_end = number_zone
-            
+            # --- Step 1: Extract initial lines as before ---
+            raw_lines = []
             for line in lines:
                 numbers = []
                 text = []
-                
                 current_number = []
                 last_x0 = None
-                
                 words_in_line = sorted(line, key=lambda w: w['x0'])
-                i = 0
-                while i < len(words_in_line):
-                    word = words_in_line[i]
+                j = 0
+                while j < len(words_in_line):
+                    word = words_in_line[j]
                     word_text = word['text'].strip()
-                    
-                    # Check for split parenthetical numbers
-                    if word_text == '(' and i + 1 < len(words_in_line):
-                        next_word = words_in_line[i + 1]
+                    if word_text == '(' and j + 1 < len(words_in_line):
+                        next_word = words_in_line[j + 1]
                         next_text = next_word['text'].strip()
-                        
-                        # If next word ends with ), combine them
                         if next_text.endswith(')'):
                             combined_text = f"({next_text}"
                             if self.is_number(combined_text) and number_zone_start <= word['x0'] <= number_zone_end:
@@ -136,10 +145,8 @@ class TextExtractor:
                                     'text': self.clean_if_number(combined_text),
                                     'x0': word['x0']
                                 })
-                                i += 2  # Skip both the ( and the number)
+                                j += 2
                                 continue
-                    
-                    # Regular number processing
                     if re.match(r'^[\$\s]*-?[\d,\s]+(\.\d+)?$|^\([\d,]+(\.\d+)?\)$', word_text):
                         if number_zone_start <= word['x0'] <= number_zone_end:
                             if last_x0 is None or word['x0'] - last_x0 <= 15:
@@ -170,9 +177,7 @@ class TextExtractor:
                                 text.extend(current_number)
                             current_number = []
                         text.append(word)
-                    i += 1
-                
-                # Don't forget to process the last number group
+                    j += 1
                 if current_number:
                     combined_text = ' '.join(w['text'] for w in current_number)
                     if self.is_number(combined_text):
@@ -182,34 +187,55 @@ class TextExtractor:
                         })
                     else:
                         text.extend(current_number)
-                
-                # Process text
                 text_words = sorted(text, key=lambda w: w['x0'])
-                # Handle trailing dash
                 text_part = ' '.join(w['text'].replace('$', '').strip() for w in text_words)
                 text_part = text_part.strip()
-                if text_part.endswith(' -'):
-                    text_part = text_part[:-2].strip()  # Remove trailing dash
-                    # Add a None placeholder in the numbers list
-                    if not numbers:  # Only if there are no numbers yet
-                        numbers.append({'text': None, 'x0': float('inf')})
-                
                 number_part = [n['text'] for n in sorted(numbers, key=lambda n: n['x0'])]
-                
-                if text_part or number_part:  # Only add non-empty lines
-                    processed_lines.append({
-                        'description': text_part.strip(),
-                        'numbers': number_part
-                    })
+                raw_lines.append({
+                    'description': text_part,
+                    'numbers': number_part
+                })
+            # --- Step 2: Assign sections to all lines (using a helper) ---
+            matcher = TemplateMatcher()
+            assigned = matcher.assign_sections_by_context([
+                {'description': l['description'], 'numbers': l['numbers']} for l in raw_lines
+            ])
+            # --- Step 3: Robust row-combining logic ---
+            i = 0
+            while i < len(assigned):
+                curr = assigned[i]
+                desc = curr['description']
+                nums = curr['numbers'] if isinstance(curr['numbers'], list) else ([curr['numbers']] if curr['numbers'] else [])
+                section = curr.get('section', None)
+                # If description-only row
+                if desc and (not nums or all(n in [None, ''] for n in nums)) and i + 1 < len(assigned):
+                    next_row = assigned[i + 1]
+                    next_desc = next_row['description']
+                    next_nums = next_row['numbers'] if isinstance(next_row['numbers'], list) else ([next_row['numbers']] if next_row['numbers'] else [])
+                    next_section = next_row.get('section', None)
+                    # If next row is description+number and same section, combine
+                    if next_desc and next_nums and section == next_section:
+                        combined_desc = desc + ' ' + next_desc
+                        processed_lines.append({
+                            'description': combined_desc.strip(),
+                            'numbers': next_nums
+                        })
+                        i += 2
+                        continue
+                # Otherwise, keep as is
+                processed_lines.append({
+                    'description': desc.strip(),
+                    'numbers': nums
+                })
+                i += 1
         else:
             for line in lines:
                 line_text = ' '.join(word['text'].replace('$', '').strip() for word in sorted(line, key=lambda w: w['x0']))
-                if line_text.strip():  # Only add non-empty lines
+                if line_text.strip():
                     processed_lines.append({
                         'description': line_text.strip(),
                         'numbers': []
                     })
-        
         return processed_lines
 
     def export_to_excel(self, data: Dict[str, List[dict]], pdf_name: str):
@@ -510,8 +536,13 @@ class TextExtractor:
             return None, None
 
 def main(): 
-    input_pdfs_dir = Path("input_pdfs")
-    input_pdfs_dir.mkdir(exist_ok=True) #if doesn't exist, create
+    # Get project root directory (two levels up from this file)
+    current_dir = Path(__file__).resolve().parent
+    project_root = current_dir.parent.parent
+    
+    # Set up input and output directories relative to project root
+    input_pdfs_dir = project_root / "input_pdfs"
+    input_pdfs_dir.mkdir(exist_ok=True)
 
     if len(sys.argv) > 1: 
         pdf_filename = sys.argv[1]

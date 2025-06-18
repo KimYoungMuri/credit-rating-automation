@@ -1,6 +1,6 @@
 from pathlib import Path
 from final_extractor import TextExtractor
-from final_template_mapper import TemplateMapper
+from final_template_mapper import TemplateMatcher
 from final_find_fs import FinancialStatementFinder
 import glob
 import os
@@ -12,6 +12,11 @@ import shutil
 from openpyxl import load_workbook
 import torch
 from transformers import BertTokenizer, BertForSequenceClassification
+import openai
+from typing import List, Dict, Tuple, Optional
+import numpy as np
+from tenacity import retry, stop_after_attempt, wait_random_exponential
+from sentence_transformers import SentenceTransformer
 
 class TeeOutput:
     def __init__(self, filename):
@@ -67,17 +72,67 @@ def verify_all_items_used(extracted_data, flagged_extracted):
     
     return unused_items
 
+class EmbeddingMatcher:
+    def __init__(self, model_name="all-MiniLM-L6-v2"):
+        """Initialize with Sentence Transformers model"""
+        try:
+            self.model = SentenceTransformer(model_name)
+            self.use_sbert = True
+        except Exception as e:
+            print(f"Warning: Could not load Sentence Transformers model: {str(e)}")
+            print("Falling back to FinBERT")
+            self.use_sbert = False
+            model_name = "ProsusAI/finbert"
+            self.tokenizer = BertTokenizer.from_pretrained(model_name)
+            self.model = BertForSequenceClassification.from_pretrained(model_name)
+            self.model.eval()
+
+    def get_embedding(self, text: str) -> np.ndarray:
+        """Get embeddings using Sentence Transformers"""
+        if self.use_sbert:
+            return self.model.encode(text, convert_to_numpy=True)
+        else:
+            return self._get_finbert_embedding(text)
+
+    def _get_finbert_embedding(self, text: str) -> np.ndarray:
+        """Fallback to FinBERT embeddings"""
+        try:
+            inputs = self.tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=128)
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                # Use the last hidden state as embedding
+                embeddings = outputs.hidden_states[-1].mean(dim=1)
+                return embeddings[0].numpy()
+        except Exception as e:
+            print(f"FinBERT error: {str(e)}")
+            return np.zeros(768)  # Return zero vector as fallback
+
+    def get_similarity(self, text1: str, text2: str) -> float:
+        """Get cosine similarity between two texts"""
+        if self.use_sbert:
+            # SentenceTransformer's encode handles batching efficiently
+            embeddings = self.model.encode([text1, text2], convert_to_numpy=True)
+            return self._cosine_similarity(embeddings[0], embeddings[1])
+        else:
+            emb1 = self.get_embedding(text1)
+            emb2 = self.get_embedding(text2)
+            return self._cosine_similarity(emb1, emb2)
+
+    def _cosine_similarity(self, v1: np.ndarray, v2: np.ndarray) -> float:
+        """Compute cosine similarity between two vectors"""
+        dot_product = np.dot(v1, v2)
+        norm1 = np.linalg.norm(v1)
+        norm2 = np.linalg.norm(v2)
+        return dot_product / (norm1 * norm2)
+
 def populate_excel_template(extracted_data, template_path=None):
     """
     Populate Excel template with extracted financial data using subsection-aware, flagging, and 'Other(s)' logic.
     """
     from collections import defaultdict
     
-    # Initialize FinBERT
-    model_name = "ProsusAI/finbert"
-    tokenizer = BertTokenizer.from_pretrained(model_name)
-    model = BertForSequenceClassification.from_pretrained(model_name)
-    model.eval()
+    # Initialize embedding matcher (will use OpenAI if API key available)
+    matcher = EmbeddingMatcher()
     
     # Subsection keywords for contextual matching
     SUBSECTION_KEYWORDS = {
@@ -152,21 +207,12 @@ def populate_excel_template(extracted_data, template_path=None):
         return s.lower().replace('-', ' ').replace('_', ' ').replace('—', ' ').replace(':', '').strip() if s else ''
 
     def get_semantic_similarity(text1, text2):
-        """Get semantic similarity score using FinBERT"""
-        try:
-            inputs = tokenizer(text1, text2, return_tensors="pt", padding=True, truncation=True)
-            with torch.no_grad():
-                outputs = model(**inputs)
-                logits = outputs.logits
-                probabilities = torch.nn.functional.softmax(logits, dim=1)
-                return probabilities[0][1].item()  # Probability of being similar
-        except Exception as e:
-            print(f"FinBERT error: {str(e)}")
-            return 0.0
+        """Get semantic similarity score using embeddings"""
+        return matcher.get_similarity(text1, text2)
 
     def find_subsection(item_desc: str, context_items: list, statement_type: str) -> list:
         """
-        Find potential subsections for an item using FinBERT and contextual information.
+        Find potential subsections for an item using embeddings and contextual information.
         
         Args:
             item_desc: The description of the line item
@@ -201,7 +247,7 @@ def populate_excel_template(extracted_data, template_path=None):
             if score > 0:
                 potential_subsections[section] = max(potential_subsections.get(section, 0), score)
                 
-        # 2. FinBERT semantic matching
+        # 2. Semantic matching using embeddings
         for section in relevant_sections:
             # Create section description from keywords
             section_desc = ' '.join(SUBSECTION_KEYWORDS[section])
@@ -291,7 +337,7 @@ def populate_excel_template(extracted_data, template_path=None):
                     best_direct = row
                     best_direct_score = overlap_score
             
-            # Semantic matching using FinBERT
+            # Semantic matching using embeddings
             semantic_score = get_semantic_similarity(item, label)
             if semantic_score > best_semantic_score:
                 best_semantic = row
@@ -431,113 +477,86 @@ def populate_excel_template(extracted_data, template_path=None):
     print(f"\nPopulated Excel template saved to: {output_path}")
     return output_path
 
+def export_to_template(results, output_dir):
+    """Export the mapped results to an Excel template"""
+    # Get project root directory
+    current_dir = Path(__file__).resolve().parent
+    project_root = current_dir.parent.parent
+    
+    # Use the template from templates directory
+    template_path = project_root / "templates" / "financial_template.xlsx"
+    
+    if not template_path.exists():
+        print(f"Template not found at {template_path}")
+        return None
+        
+    # Convert results format to match what populate_excel_template expects
+    converted_data = {}
+    for stmt_type, years in results.items():
+        converted_data[stmt_type] = years  # The format is already correct - both use {'2024': {}, '2023': {}}
+        
+    # Call populate_excel_template with the converted data
+    return populate_excel_template(converted_data, str(template_path))
+
 def main():
-    try:
-        # Get base directory
-        base_dir = Path(__file__).resolve().parent.parent.parent
-        debug_print(f"Base directory: {base_dir}")
+    # Get project root directory (two levels up from this file)
+    current_dir = Path(__file__).resolve().parent
+    project_root = current_dir.parent.parent
+    
+    # Set up input and output directories relative to project root
+    input_pdfs_dir = project_root / "input_pdfs"
+    output_dir = project_root / "output_excel"
+    input_pdfs_dir.mkdir(exist_ok=True)
+    output_dir.mkdir(exist_ok=True)
+
+    if len(sys.argv) > 1: 
+        pdf_filename = sys.argv[1]
+    else: 
+        pdf_filename = "US_Venture_2024.pdf"  # Default to US_Venture_2024.pdf
+
+    pdf_path = input_pdfs_dir / pdf_filename
+    pdf_path = str(pdf_path.resolve())
+
+    print(f"Base directory: {project_root}")
+    print(f"Looking for PDF file: {pdf_path}")
+
+    if not Path(pdf_path).exists():
+        print(f"PDF file path not found: {pdf_path}")
+        return
+    
+    # First run the extractor
+    print("\nRunning text extractor...")
+    extractor = TextExtractor()
+    excel_path, extracted_data = extractor.extract_text(pdf_path, process_numbers=True)
+    
+    if not excel_path or not extracted_data:
+        print("Failed to extract data from PDF")
+        return
         
-        # Setup debug log file
-        debug_log = open(base_dir / "debug.log", "w", encoding='utf-8')
-        debug_print("Debug log file created", debug_log)
+    # Now run template mapper
+    print("\nRunning template mapper...")
+    from final_template_mapper import TemplateMatcher
+    mapper = TemplateMatcher()
+    
+    print("Processing extracted data...")
+    results = mapper.process_excel(str(excel_path))
+    
+    if results:
+        print("\nMapping Results:")
+        print("=" * 50)
         
-        # Create output directory if it doesn't exist
-        output_dir = base_dir / "output_excel"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        debug_print(f"Output directory created/verified: {output_dir}", debug_log)
+        for stmt_type, years in results.items():
+            print(f"\n{stmt_type.replace('_', ' ').title()}:")
+            for year in ['2024', '2023']:
+                print(f"\n{year}:")
+                for item, value in years[year].items():
+                    print(f"{item}: {value}")
         
-        # Get the input PDF path
-        input_pdf = base_dir / "input_pdfs" / "US_Venture_2024.pdf"
-        debug_print(f"Looking for PDF file: {input_pdf}", debug_log)
-        
-        if not input_pdf.exists():
-            debug_print(f"PDF file not found: {input_pdf}", debug_log)
-            return
-            
-        # First get correct page numbers from final_find_fs.py
-        debug_print("Getting correct page numbers...", debug_log)
-        finder = FinancialStatementFinder()
-        finder.extractContent(str(input_pdf))
-        
-        # Get pages with high confidence (>= 80%)
-        statement_pages = finder.get_statement_pages()
-        
-        # Print found pages and ask for confirmation
-        print("\nFound the following pages:")
-        print("Balance Sheet pages:", statement_pages.get('balance_sheet', []))
-        print("Income Statement pages:", statement_pages.get('income_statement', []))
-        print("Cash Flow pages:", statement_pages.get('cash_flow', []))
-        
-        confirm = input("\nWould you like to continue with these pages? [y/n]: ").lower()
-        
-        if confirm != 'y':
-            print("\nPlease input your preferred page numbers:")
-            bs_pages = input("Balance Sheet pages (comma-separated): ")
-            is_pages = input("Income Statement pages (comma-separated): ")
-            cf_pages = input("Cash Flow pages (comma-separated): ")
-            
-            # Convert input strings to lists of integers
-            statement_pages = {
-                'balance_sheet': [int(p.strip()) for p in bs_pages.split(',') if p.strip()],
-                'income_statement': [int(p.strip()) for p in is_pages.split(',') if p.strip()],
-                'cash_flow': [int(p.strip()) for p in cf_pages.split(',') if p.strip()]
-            }
-            
-        debug_print("\nUsing statement pages:", debug_log)
-        debug_print(f"Balance Sheet pages: {statement_pages.get('balance_sheet', [])}", debug_log)
-        debug_print(f"Income Statement pages: {statement_pages.get('income_statement', [])}", debug_log)
-        debug_print(f"Cash Flow pages: {statement_pages.get('cash_flow', [])}", debug_log)
-            
-        debug_print("Starting extraction process...", debug_log)
-        
-        # Create and run extractor
-        extractor = TextExtractor()
-        excel_path, extracted_data = extractor.extract_text(str(input_pdf), process_numbers=True, statement_pages=statement_pages)
-        
-        if excel_path and extracted_data:
-            debug_print(f"Excel file created: {excel_path}", debug_log)
-            
-            # Display extracted data
-            if extracted_data:
-                debug_print("\nExtracted Data:", debug_log)
-                debug_print("=" * 50, debug_log)
-                for stmt_type, lines in extracted_data.items():
-                    debug_print(f"\n{stmt_type.replace('_', ' ').title()}:", debug_log)
-                    for line in lines:
-                        if line['numbers']:  # Only print lines with numbers
-                            debug_print(f"{line['description']}: {line['numbers']}", debug_log)
-                        
-            # Display extracted data
-            debug_print("\nReading extracted data from Excel...", debug_log)
-            df = pd.read_excel(excel_path)
-            debug_print(f"Found {len(df)} rows of data", debug_log)
-            
-            # Write raw data to debug log
-            debug_print("\nRaw Extracted Data:", debug_log)
-            debug_print("=" * 80, debug_log)
-            debug_print(df.to_string(), debug_log)
-            
-            # Run template mapper
-            debug_print("\nRunning template mapper...", debug_log)
-            mapper = TemplateMapper()
-            results = mapper.process_excel(excel_path)
-            
-            if results:
-                # Populate Excel template
-                template_path = base_dir / "templates" / "financial_template.xlsx"
-                if template_path.exists():
-                    populated_path = populate_excel_template(results, str(template_path))
-                    debug_print(f"\nTemplate populated and saved to: {populated_path}", debug_log)
-                else:
-                    debug_print(f"\nTemplate file not found at: {template_path}", debug_log)
-                    
-        else:
-            debug_print("Failed to create Excel file.", debug_log)
-            
-    except Exception as e:
-        debug_print(f"\nError in main: {str(e)}", debug_log)
-        debug_print(traceback.format_exc(), debug_log)
-        raise
+        # Export to template
+        template_path = export_to_template(results, output_dir)
+        print(f"\nTemplate populated and saved to: {template_path}")
+    else:
+        print("Failed to map data to template")
 
 if __name__ == "__main__":
     main() 
