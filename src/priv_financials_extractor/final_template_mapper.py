@@ -100,6 +100,106 @@ import shutil
 from openpyxl import load_workbook
 from collections import defaultdict
 
+# Place these at the module level, outside of any function
+IS_SECTION_TEMPLATE = {
+    'revenue': {
+        'template': [
+            'Revenue', 'Other Revenue'
+        ]
+    },
+    'operating_expenses': {
+        'template': [
+            'Cost of revenue', 'Station operations costs', 'Payroll and related costs',
+            'Depreciation and amortization', 'Impairment and other losses', 'Selling, general and administrative expenses', 'Other Operating Expenses'
+        ]
+    },
+    'other_income_expense': {
+        'template': [
+            'Interest expense', 'Other (income) and expense, net', 'Other Income/Expense'
+        ]
+    },
+    'tax_net_income': {
+        'template': [
+            'Income tax benefit', 'Net profit (loss)']
+    }
+}
+
+CFS_SECTION_TEMPLATE = {
+    'operating_activities': {
+        'template': [
+            'Net profit (loss)', 'Adjustments to reconcile net profit', 'Depreciation', 'Deferred income taxes', 'Impairment and other losses', 'Changes in operating assets and liabilities', 'Net cash provided by (used in) operating activities', 'Other Operating Activities'
+        ]
+    },
+    'investing_activities': {
+        'template': [
+            'Purchases of property and equipment', 'Proceeds from sale of assets', 'Net cash used in investing activities', 'Other Investing Activities'
+        ]
+    },
+    'financing_activities': {
+        'template': [
+            'Proceeds from issuance', 'Principal payments', 'Net cash provided by (used in) financing activities', 'Other Financing Activities'
+        ]
+    },
+    'other': {
+        'template': ['Other']
+    }
+}
+
+# Expand manual mapping for IS and CFS
+manual_section_map = {}
+manual_section_map.update({
+    # IS Revenue
+    'revenue net': 'revenue',
+    'revenue': 'revenue',
+    'other revenue': 'revenue',
+    # IS Operating Expenses
+    'cost of revenue': 'operating_expenses',
+    'station operations costs': 'operating_expenses',
+    'payroll and related costs': 'operating_expenses',
+    'depreciation and amortization': 'operating_expenses',
+    'impairment and other losses': 'operating_expenses',
+    'selling general and administrative expenses': 'operating_expenses',
+    'other operating expenses': 'operating_expenses',
+    # IS Other Income/Expense
+    'interest expense': 'other_income_expense',
+    'other income and expense net': 'other_income_expense',
+    'other income expense': 'other_income_expense',
+    # IS Tax/Net Income
+    'income tax benefit': 'tax_net_income',
+    'net profit loss': 'tax_net_income',
+    # CFS Operating Activities
+    'net profit loss': 'operating_activities',
+    'adjustments to reconcile net profit': 'operating_activities',
+    'depreciation': 'operating_activities',
+    'deferred income taxes': 'operating_activities',
+    'impairment and other losses': 'operating_activities',
+    'changes in operating assets and liabilities': 'operating_activities',
+    'net cash provided by used in operating activities': 'operating_activities',
+    'other operating activities': 'operating_activities',
+    # CFS Investing Activities
+    'purchases of property and equipment': 'investing_activities',
+    'proceeds from sale of assets': 'investing_activities',
+    'net cash used in investing activities': 'investing_activities',
+    'other investing activities': 'investing_activities',
+    # CFS Financing Activities
+    'proceeds from issuance': 'financing_activities',
+    'principal payments': 'financing_activities',
+    'net cash provided by used in financing activities': 'financing_activities',
+    'other financing activities': 'financing_activities',
+})
+
+# Add section boundary keywords for IS and CFS
+section_boundary_keywords = {}
+section_boundary_keywords['is_section_boundaries'] = [
+    'revenue', 'cost of revenue', 'station operations costs', 'payroll and related costs',
+    'depreciation and amortization', 'impairment and other losses', 'selling general and administrative expenses',
+    'income from operations', 'interest expense', 'other income and expense net', 'income tax benefit', 'net profit loss'
+]
+section_boundary_keywords['cfs_section_boundaries'] = [
+    'cash flows from operating activities', 'cash flows from investing activities', 'cash flows from financing activities',
+    'net cash provided by used in operating activities', 'net cash used in investing activities', 'net cash provided by used in financing activities'
+]
+
 class TemplateMatcher:
     TOTAL_NET_PATTERNS = [
         r'^total\s+current\s+assets?$',
@@ -1074,6 +1174,65 @@ class TemplateMatcher:
                         for desc, template_item, score in manual_review_items:
                             print(f"  '{desc}' -> '{template_item}' (confidence: {score:.2f})")
         
+        # --- Add IS and CFS section structures and templates ---
+        IS_SECTION_TEMPLATE = {
+            'revenue': {
+                'template': [
+                    'Revenue', 'Other Revenue'
+                ]
+            },
+            'operating_expenses': {
+                'template': [
+                    'Cost of revenue', 'Station operations costs', 'Payroll and related costs',
+                    'Depreciation and amortization', 'Impairment and other losses', 'Selling, general and administrative expenses', 'Other Operating Expenses'
+                ]
+            },
+            'other_income_expense': {
+                'template': [
+                    'Interest expense', 'Other (income) and expense, net', 'Other Income/Expense'
+                ]
+            },
+            'tax_net_income': {
+                'template': [
+                    'Income tax benefit', 'Net profit (loss)']
+            }
+        }
+
+        CFS_SECTION_TEMPLATE = {
+            'operating_activities': {
+                'template': [
+                    'Net profit (loss)', 'Adjustments to reconcile net profit', 'Depreciation', 'Deferred income taxes', 'Impairment and other losses', 'Changes in operating assets and liabilities', 'Net cash provided by (used in) operating activities', 'Other Operating Activities'
+                ]
+            },
+            'investing_activities': {
+                'template': [
+                    'Purchases of property and equipment', 'Proceeds from sale of assets', 'Net cash used in investing activities', 'Other Investing Activities'
+                ]
+            },
+            'financing_activities': {
+                'template': [
+                    'Proceeds from issuance', 'Principal payments', 'Net cash provided by (used in) financing activities', 'Other Financing Activities'
+                ]
+            },
+            'other': {
+                'template': ['Other']
+            }
+        }
+
+        # --- Add section boundary keywords for IS and CFS ---
+        section_boundary_keywords['is_section_boundaries'] = [
+            'revenue', 'cost of revenue', 'station operations costs', 'payroll and related costs',
+            'depreciation and amortization', 'impairment and other losses', 'selling general and administrative expenses',
+            'income from operations', 'interest expense', 'other income and expense net', 'income tax benefit', 'net profit loss'
+        ]
+        section_boundary_keywords['cfs_section_boundaries'] = [
+            'cash flows from operating activities', 'cash flows from investing activities', 'cash flows from financing activities',
+            'net cash provided by used in operating activities', 'net cash used in investing activities', 'net cash provided by used in financing activities'
+        ]
+
+        # --- Add debug output for IS and CFS mapping (mirroring BS logic) ---
+        # (The rest of the code for section assignment and mapping should mirror the robust logic used for the balance sheet, using the new IS and CFS structures, manual mapping, and boundaries.)
+
         wb.save(output_path)
         self.extraction_logger.info("\n==== MAPPING TO TEMPLATE END ====")
         return str(output_path)
