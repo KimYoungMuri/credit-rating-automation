@@ -43,200 +43,235 @@ class TextExtractor:
         logging.root.setLevel(logging.INFO)
         logging.info("Logging initialized successfully")
 
-    def clean_if_number(self, text: str) -> str:
+    def clean_and_validate_number(self, text: str) -> Optional[str]:
+        """
+        Cleans and validates if a string is a parsable financial number.
+        Handles parentheses, currency symbols, commas, and trailing dashes.
+        Returns a clean number string (e.g., '-123.45') or None.
+        """
+        if not text:
+            return None
+        
         original_text = text
         text = text.strip()
+        # Normalize different dash characters to a standard hyphen
+        text = re.sub(r'[–—]', '-', text)
         
+        # Remove currency symbols and commas for easier parsing
+        text = text.replace('$', '').replace(',', '')
+        # Handle cases like '1 234' -> '1234'
         text = re.sub(r'(\d)\s+(\d)', r'\1\2', text)
-        text = re.sub(r'\s*,\s*', ',', text)
-        
-        # Handle parenthetical numbers first
-        if text.startswith('(') and text.endswith(')'):
-            inner_text = text[1:-1].replace('$', '').replace(',', '').strip()
-            if inner_text.isdigit() or (inner_text.replace('.', '').isdigit() and inner_text.count('.') == 1):
-                return '-' + inner_text
-        
-        # Handle regular numbers
-        if text.replace('$', '').replace(',', '').strip().isdigit():
-            return text.replace('$', '').replace(',', '').strip()
-        
-        if re.fullmatch(r'-?\\d+(\\.\\d+)?', text):
-            return text
-        
-        return original_text
 
-    def convert_to_float(self, text: str) -> float:
-        text = text.replace('$', '').replace(' ', '')
-        if text.startswith('(') and text.endswith(')'): #parantheses
-            text = '-' + text[1:-1]
-        return float(text.replace(',', ''))
+        # Handle parenthetical numbers, which can have spaces, e.g., "( 123.45 )" -> "-123.45"
+        match = re.match(r'^\(\s*([\d\.]+)\s*\)$', text)
+        if match:
+            return '-' + match.group(1)
+
+        # Handle trailing negative signs, e.g., "123.45-" -> "-123.45"
+        if text.endswith('-'):
+            text = '-' + text[:-1]
+        
+        # Final check if it's a valid floating point number
+        try:
+            float(text)
+            return text
+        except ValueError:
+            # It's not a valid number
+            return None
 
     def is_number(self, text: str) -> bool:
-        text = re.sub(r'(\d)\s+(\d)', r'\1\2', text.strip())
-        text = re.sub(r'\s*,\s*', ',', text)
-        #return bool(re.match(r'^[\$\s]*-?[\d,]+(\.\d+)?$|^\([\d,]+(\.\d+)?\)$', text))
-        return bool(re.match(r'^[\$\s]*[-\(]?[\d,]+(\.\d+)?[\)]?$', text)) #attempted fix
-    def find_number_columns(self, words: List[dict]) -> Optional[Tuple[float, float]]:
-        x_positions = defaultdict(list)
+        """
+        A lenient check to see if a word is potentially part of a number.
+        The final validation is done in clean_and_validate_number.
+        """
+        # A word is potentially a number if it contains at least one digit.
+        if not any(char.isdigit() for char in text):
+            return False
         
-        for word in words:
-            word_text = re.sub(r'(\d)\s+(\d)', r'\1\2', word['text'].strip())
-            word_text = re.sub(r'\s*,\s*', ',', word_text)
+        # And if it's composed only of characters common in financial numbers.
+        # This is lenient and includes separators that might be part of the text.
+        text_no_space = text.replace(' ', '')
+        if all(c in '0123456789,.$()-–—' for c in text_no_space):
+            return True
             
-            if self.is_number(word_text):
-                x_rounded = round(word['x0'] / 5) * 5
-                x_positions[x_rounded].append({
-                    'x0': word['x0'],
-                    'top': word['top'],
-                    'text': word_text
-                })
-        
-        number_columns = []
-        for x_pos, numbers in x_positions.items():
-            # Only consider positions with enough numbers
-            if len(numbers) >= 3:
-                has_dollar_signs = any('$' in n['text'] for n in numbers)
-                try:
-                    # Look for large numbers and numbers with commas
-                    has_financial_format = any(
-                        abs(self.convert_to_float(n['text'])) > 1000 or 
-                        ',' in n['text'] or 
-                        '$' in n['text']
-                        for n in numbers
-                    )
-                    if has_dollar_signs or has_financial_format:
-                        number_columns.append(x_pos)
-                except ValueError:
-                    continue
-        
-        if number_columns:
-            all_numbers = []
-            for x_pos in number_columns:
-                all_numbers.extend(x_positions[x_pos])
-            
-            leftmost_x = min(n['x0'] for n in all_numbers)
-            rightmost_x = max(n['x0'] for n in all_numbers)
-            return leftmost_x - 20, rightmost_x + 20
-        return None
+        return False
 
-    def process_numbers(self, lines: List[List[dict]], number_zone: Tuple[float, float] = None) -> List[str]:
+    def find_number_columns(self, words: List[dict]) -> List[Tuple[float, float]]:
+        """
+        Identifies distinct vertical columns of numbers on a page using clustering.
+        This is robust against variations in horizontal spacing.
+        """
+        all_number_words = []
+        for word in words:
+            # We use is_number for a quick check, as clean_and_validate is more expensive
+            if self.is_number(word['text']):
+                all_number_words.append(word)
+
+        if not all_number_words:
+            return []
+
+        # Cluster word x-positions to find columns
+        x_coords = sorted([word['x0'] for word in all_number_words])
+        
+        if not x_coords:
+            return []
+
+        clusters = []
+        if x_coords:
+            current_cluster = [x_coords[0]]
+            # A gap of ~4 characters is a good threshold for a new column
+            COLUMN_GAP_THRESHOLD = 30 
+
+            for x in x_coords[1:]:
+                if x - current_cluster[-1] < COLUMN_GAP_THRESHOLD:
+                    current_cluster.append(x)
+                else:
+                    clusters.append(current_cluster)
+                    current_cluster = [x]
+            clusters.append(current_cluster)
+
+        # Define column boundaries from clusters
+        final_columns = []
+        for cluster in clusters:
+            if not cluster: continue
+            
+            # Find all words that fall into this cluster's x-range
+            min_x, max_x = min(cluster), max(cluster)
+            cluster_words = [w for w in all_number_words if min_x <= w['x0'] <= max_x]
+            
+            # A real column must contain a minimum number of values
+            if len(cluster_words) < 3:
+                continue
+
+            leftmost_x = min(w['x0'] for w in cluster_words)
+            rightmost_x = max(w['x0'] + len(w['text']) * 7 for w in cluster_words) # Avg char width 7px
+            
+            final_columns.append((leftmost_x - 5, rightmost_x + 5)) # Add padding
+        
+        # Merge overlapping columns that were generated
+        if not final_columns:
+            return []
+        
+        final_columns.sort()
+        merged_columns = [final_columns[0]]
+        for current_start, current_end in final_columns[1:]:
+            last_start, last_end = merged_columns[-1]
+            if current_start < last_end: # Overlap detected
+                merged_columns[-1] = (last_start, max(last_end, current_end))
+            else:
+                merged_columns.append((current_start, current_end))
+
+        print(f"DEBUG: Found {len(merged_columns)} number columns: {merged_columns}")
+        return merged_columns
+
+    def process_numbers(self, lines: List[List[dict]], number_columns: List[Tuple[float, float]] = None, stmt_type: str = 'balance_sheet') -> List[dict]:
+        """
+        Processes lines of words into a structured format of {description, numbers}.
+        It robustly separates text from numbers and places numbers in the correct column.
+        """
         processed_lines = []
-        if number_zone:
-            number_zone_start, number_zone_end = number_zone
-            # --- Step 1: Extract initial lines as before ---
-            raw_lines = []
-            for line in lines:
-                numbers = []
-                text = []
-                current_number = []
-                last_x0 = None
-                words_in_line = sorted(line, key=lambda w: w['x0'])
-                j = 0
-                while j < len(words_in_line):
-                    word = words_in_line[j]
-                    word_text = word['text'].strip()
-                    if word_text == '(' and j + 1 < len(words_in_line):
-                        next_word = words_in_line[j + 1]
-                        next_text = next_word['text'].strip()
-                        if next_text.endswith(')'):
-                            combined_text = f"({next_text}"
-                            if self.is_number(combined_text) and number_zone_start <= word['x0'] <= number_zone_end:
-                                numbers.append({
-                                    'text': self.clean_if_number(combined_text),
-                                    'x0': word['x0']
-                                })
-                                j += 2
-                                continue
-                    if re.match(r'^[\$\s]*-?[\d,\s]+(\.\d+)?$|^\([\d,]+(\.\d+)?\)$', word_text):
-                        if number_zone_start <= word['x0'] <= number_zone_end:
-                            if last_x0 is None or word['x0'] - last_x0 <= 15:
-                                current_number.append(word)
-                            else:
-                                if current_number:
-                                    combined_text = ' '.join(w['text'] for w in current_number)
-                                    if self.is_number(combined_text):
-                                        numbers.append({
-                                            'text': self.clean_if_number(combined_text),
-                                            'x0': current_number[0]['x0']
-                                        })
-                                    else:
-                                        text.extend(current_number)
-                                current_number = [word]
-                            last_x0 = word['x0']
-                        else:
-                            text.append(word)
-                    else:
-                        if current_number:
-                            combined_text = ' '.join(w['text'] for w in current_number)
-                            if self.is_number(combined_text):
-                                numbers.append({
-                                    'text': self.clean_if_number(combined_text),
-                                    'x0': current_number[0]['x0']
-                                })
-                            else:
-                                text.extend(current_number)
-                            current_number = []
-                        text.append(word)
-                    j += 1
-                if current_number:
-                    combined_text = ' '.join(w['text'] for w in current_number)
-                    if self.is_number(combined_text):
-                        numbers.append({
-                            'text': self.clean_if_number(combined_text),
-                            'x0': current_number[0]['x0']
-                        })
-                    else:
-                        text.extend(current_number)
-                text_words = sorted(text, key=lambda w: w['x0'])
-                text_part = ' '.join(w['text'].replace('$', '').strip() for w in text_words)
-                text_part = text_part.strip()
-                number_part = [n['text'] for n in sorted(numbers, key=lambda n: n['x0'])]
-                raw_lines.append({
-                    'description': text_part,
-                    'numbers': number_part
-                })
-            # --- Step 2: Assign sections to all lines (using a helper) ---
-            matcher = TemplateMatcher()
-            assigned = matcher.assign_sections_by_context([
-                {'description': l['description'], 'numbers': l['numbers']} for l in raw_lines
-            ])
-            # --- Step 3: Robust row-combining logic ---
-            i = 0
-            while i < len(assigned):
-                curr = assigned[i]
-                desc = curr['description']
-                nums = curr['numbers'] if isinstance(curr['numbers'], list) else ([curr['numbers']] if curr['numbers'] else [])
-                section = curr.get('section', None)
-                # If description-only row
-                if desc and (not nums or all(n in [None, ''] for n in nums)) and i + 1 < len(assigned):
-                    next_row = assigned[i + 1]
-                    next_desc = next_row['description']
-                    next_nums = next_row['numbers'] if isinstance(next_row['numbers'], list) else ([next_row['numbers']] if next_row['numbers'] else [])
-                    next_section = next_row.get('section', None)
-                    # If next row is description+number and same section, combine
-                    if next_desc and next_nums and section == next_section:
-                        combined_desc = desc + ' ' + next_desc
-                        processed_lines.append({
-                            'description': combined_desc.strip(),
-                            'numbers': next_nums
-                        })
-                        i += 2
-                        continue
-                # Otherwise, keep as is
-                processed_lines.append({
-                    'description': desc.strip(),
-                    'numbers': nums
-                })
-                i += 1
-        else:
+        if not number_columns:
             for line in lines:
                 line_text = ' '.join(word['text'].replace('$', '').strip() for word in sorted(line, key=lambda w: w['x0']))
                 if line_text.strip():
-                    processed_lines.append({
-                        'description': line_text.strip(),
-                        'numbers': []
+                    processed_lines.append({'description': line_text.strip(),'numbers': []})
+            return processed_lines
+
+        for line in lines:
+            text_words = []
+            potential_number_words = []
+
+            # 1. Classify words into text or potential numbers
+            for word in line:
+                if self.is_number(word['text']):
+                    potential_number_words.append(word)
+                else:
+                    text_words.append(word)
+
+            # 2. Assemble the description from text words
+            description = ' '.join(w['text'] for w in sorted(text_words, key=lambda w: w['x0']))
+            
+            # 3. Place numbers into their column buckets
+            number_values = [None] * len(number_columns)
+            
+            for num_word in potential_number_words:
+                cleaned_num = self.clean_and_validate_number(num_word['text'])
+                if cleaned_num is None:
+                    # If it looked like a number but wasn't, treat it as text
+                    description += ' ' + num_word['text']
+                    continue
+
+                word_center_x = num_word['x0'] + (len(num_word['text']) * 7 / 2)
+                
+                best_col_idx = -1
+                # Find which column this number belongs to
+                for i, (col_start, col_end) in enumerate(number_columns):
+                    if col_start <= word_center_x <= col_end:
+                        best_col_idx = i
+                        break
+                
+                if best_col_idx != -1:
+                    number_values[best_col_idx] = cleaned_num
+                else:
+                    # If it didn't fit in a column, it's probably part of the description
+                    description += ' ' + num_word['text']
+            
+            # Final cleanup of the description
+            description = re.sub(r'\s+', ' ', description).strip()
+            
+            # Only add the line if it has content
+            if description or any(v is not None for v in number_values):
+                processed_lines.append({
+                    'description': description,
+                    'numbers': number_values
+                })
+
+        # --- Step 2: Assign sections to all lines (using a helper) ---
+        matcher = TemplateMatcher()
+        
+        raw_lines_for_matcher = [
+            {'description': l['description'], 'numbers': l['numbers']} for l in processed_lines
+        ]
+
+        if stmt_type == 'income_statement':
+            assigned = matcher.assign_sections_by_context_is(raw_lines_for_matcher)
+        elif stmt_type == 'cash_flow':
+            assigned = matcher.assign_sections_by_context_cfs(raw_lines_for_matcher)
+        else: # balance_sheet or default
+            assigned = matcher.assign_sections_by_context(raw_lines_for_matcher)
+        
+        # --- Step 3: Robust row-combining logic ---
+        final_processed_lines = []
+        i = 0
+        while i < len(assigned):
+            curr = assigned[i]
+            desc = curr['description']
+            nums = curr['value'] if isinstance(curr['value'], list) else ([curr['value']] if curr['value'] else [])
+            section = curr.get('section', None)
+            
+            # Combine description-only rows with the next row if it has numbers
+            if desc and (not nums or all(n in [None, ''] for n in nums)) and i + 1 < len(assigned):
+                next_row = assigned[i + 1]
+                next_desc = next_row['description']
+                next_nums = next_row['value'] if isinstance(next_row['value'], list) else ([next_row['value']] if next_row['value'] else [])
+                next_section = next_row.get('section', None)
+
+                if next_nums and section == next_section:
+                    combined_desc = (desc + ' ' + next_desc).strip()
+                    final_processed_lines.append({
+                        'description': combined_desc,
+                        'numbers': next_nums
                     })
-        return processed_lines
+                    i += 2
+                    continue
+            
+            final_processed_lines.append({
+                'description': desc.strip(),
+                'numbers': nums
+            })
+            i += 1
+            
+        return final_processed_lines
 
     def export_to_excel(self, data: Dict[str, List[dict]], pdf_name: str):
         # Create a timestamp for the filename
@@ -388,138 +423,88 @@ class TextExtractor:
                 extracted_data = defaultdict(list)
                 
                 for stmt_type, info in statements.items():
-                    if info['pdf_page'] is not None:
-                        print(f"\nExtracting {stmt_type} from page {info['pdf_page']}")
-                        
-                        # Get the statement page
-                        page_num = info['pdf_page']
+                    # Handle multiple pages for a single statement type
+                    pages_to_process = [info['pdf_page']]
+                    if statement_pages and stmt_type in statement_pages:
+                        pages_to_process = statement_pages[stmt_type]
+                    
+                    all_processed_lines = []
+                    for page_num in pages_to_process:
                         if page_num > len(pdf.pages):
                             print(f"PAGE NUMBER ERROR: {pdf_path} has only {len(pdf.pages)} pages but exceeded")
                             continue
                             
+                        print(f"\nExtracting {stmt_type} from page {page_num}")
                         page = pdf.pages[page_num - 1]
-                        text = page.extract_text()
-                        print(f"DEBUG: Page {page_num} text starts with: {text[:100].replace('\n', ' ')}")
                         
-                        # Extract words with precise positioning
                         words = page.extract_words(
-                            x_tolerance=3,
-                            y_tolerance=3,
+                            x_tolerance=1, 
+                            y_tolerance=1, 
                             keep_blank_chars=False,
-                            use_text_flow=False,
-                            horizontal_ltr=True,
-                            vertical_ttb=True,
+                            use_text_flow=True, # More robust for reading order
                             extra_attrs=["fontname", "size"]
                         )
                         
-                        # Group words into lines
-                        lines = {}
-                        for word in words:
-                            y = round(word['top'])
-                            if y not in lines:
-                                lines[y] = []
-                            lines[y].append(word)
+                        # --- New Line Clustering Logic ---
+                        if not words: continue
                         
-                        # Filter and sort lines
-                        filtered_lines = []
-                        for y in sorted(lines.keys()):
-                            line = sorted(lines[y], key=lambda w: w['x0'])
-                            if len(line) > 0:
-                                # Filter out single-letter watermarks
-                                if len(line[-1]['text'].strip()) == 1 and line[-1]['text'].strip().isupper():
-                                    if len(line) > 1:
-                                        filtered_lines.append(line[:-1])
+                        # Sort words primarily by vertical position, then horizontal
+                        words.sort(key=lambda w: (w['top'], w['x0']))
+                        
+                        lines = []
+                        current_line = []
+                        if words:
+                            current_line.append(words[0])
+                            for word in words[1:]:
+                                # If word is on the same line (small vertical distance)
+                                if abs(word['top'] - current_line[-1]['top']) < 5:
+                                    current_line.append(word)
                                 else:
-                                    filtered_lines.append(line)
+                                    # New line detected
+                                    lines.append(sorted(current_line, key=lambda w: w['x0']))
+                                    current_line = [word]
+                            lines.append(sorted(current_line, key=lambda w: w['x0']))
                         
-                        # Find number columns
-                        number_zone = self.find_number_columns(words) if process_numbers else None
+                        filtered_lines = [line for line in lines if line] # Remove empty lines
+                        
+                        # Find number columns using all words on the page
+                        number_columns = self.find_number_columns(words) if process_numbers else []
                         
                         # Process lines into structured data
-                        processed_lines = self.process_numbers(filtered_lines, number_zone)
-                        print(f"DEBUG: Processed {len(processed_lines)} lines for {stmt_type}")
+                        processed_lines = self.process_numbers(filtered_lines, number_columns, stmt_type=stmt_type)
+                        print(f"DEBUG: Processed {len(processed_lines)} lines for {stmt_type} on page {page_num}")
+                        all_processed_lines.extend(processed_lines)
+
+                    # Store the processed lines for the statement type
+                    extracted_data[stmt_type].extend(all_processed_lines)
+                    print(f"DEBUG: Total {len(all_processed_lines)} lines stored for {stmt_type}")
+                    
+                    # Print the table for the entire statement
+                    if all_processed_lines:
+                        # Find the maximum width for the description column
+                        max_desc_width = max((len(line['description']) for line in all_processed_lines if line['description']), default=30)
+                        max_desc_width = min(max_desc_width, 80)
                         
-                        # Check for continuation pages
-                        continuation_pages = []
-                        next_page = page_num + 1
-                        while next_page <= len(pdf.pages):
-                            next_text = pdf.pages[next_page - 1].extract_text()
-                            is_cont, cont_type = finder.is_continuation_page(next_text, next_page)
-                            if is_cont and cont_type == stmt_type:
-                                print(f"DEBUG: Found continuation page {next_page} for {stmt_type}")
-                                continuation_pages.append(next_page)
-                                # Process continuation page
-                                cont_page = pdf.pages[next_page - 1]
-                                cont_words = cont_page.extract_words(
-                                    x_tolerance=3,
-                                    y_tolerance=3,
-                                    keep_blank_chars=False,
-                                    use_text_flow=False,
-                                    horizontal_ltr=True,
-                                    vertical_ttb=True,
-                                    extra_attrs=["fontname", "size"]
-                                )
-                                
-                                # Group and process continuation lines
-                                cont_lines = {}
-                                for word in cont_words:
-                                    y = round(word['top'])
-                                    if y not in cont_lines:
-                                        cont_lines[y] = []
-                                    cont_lines[y].append(word)
-                                
-                                cont_filtered_lines = []
-                                for y in sorted(cont_lines.keys()):
-                                    line = sorted(cont_lines[y], key=lambda w: w['x0'])
-                                    if len(line) > 0:
-                                        if len(line[-1]['text'].strip()) == 1 and line[-1]['text'].strip().isupper():
-                                            if len(line) > 1:
-                                                cont_filtered_lines.append(line[:-1])
-                                        else:
-                                            cont_filtered_lines.append(line)
-                                
-                                # Use same number zone for consistency
-                                cont_processed = self.process_numbers(cont_filtered_lines, number_zone)
-                                print(f"DEBUG: Processed {len(cont_processed)} lines from continuation page {next_page}")
-                                processed_lines.extend(cont_processed)
-                                next_page += 1
-                            else:
-                                break
+                        # Find the number of columns needed
+                        max_numbers = max((len(line['numbers']) for line in all_processed_lines), default=0)
                         
-                        # Store the processed lines
-                        extracted_data[stmt_type].extend(processed_lines)
-                        print(f"DEBUG: Total {len(processed_lines)} lines stored for {stmt_type}")
+                        # Print header
+                        header = f"{'Description':<{max_desc_width}}"
+                        for i in range(max_numbers):
+                            header += f" | {'Value ' + str(i+1):>15}"
+                        print("\n" + "=" * len(header))
+                        print(header)
+                        print("=" * len(header))
                         
-                        # Print the table
-                        if processed_lines:
-                            # Find the maximum width for the description column
-                            max_desc_width = max(len(line['description']) for line in processed_lines)
-                            max_desc_width = min(max_desc_width, 60)  # Cap at 60 characters
-                            
-                            # Find the number of columns needed
-                            max_numbers = max(len(line['numbers']) for line in processed_lines)
-                            
-                            # Print header
-                            header = f"{'Description':<{max_desc_width}}"
+                        # Print rows
+                        for line in all_processed_lines:
+                            desc = (line['description'] or '')[:max_desc_width]
+                            row_str = f"{desc:<{max_desc_width}}"
                             for i in range(max_numbers):
-                                header += f" | {'Value ' + str(i+1):>12}"
-                            print("\n" + "=" * len(header))
-                            print(header)
-                            print("=" * len(header))
-                            
-                            # Print rows
-                            for line in processed_lines:
-                                desc = line['description'][:max_desc_width]
-                                row = f"{desc:<{max_desc_width}}"
-                                for num in line['numbers']:
-                                    if num is None:
-                                        row += f" | {'-':>12}"
-                                    else:
-                                        row += f" | {num:>12}"
-                                for _ in range(max_numbers - len(line['numbers'])):
-                                    row += f" | {' ':>12}"
-                                print(row)
-                            print("=" * len(header) + "\n")
+                                num = line['numbers'][i] if i < len(line['numbers']) and line['numbers'][i] is not None else '-'
+                                row_str += f" | {str(num):>15}"
+                            print(row_str)
+                        print("=" * len(header) + "\n")
                 
                 # Export all data to Excel
                 if extracted_data:
@@ -556,8 +541,36 @@ def main():
         print(f"PDF file path not found: {pdf_path}")
         return
     
+    # Step 1: Use final_find_fs.py to get statement pages
+    print("Step 1: Finding financial statement pages...")
+    finder = FinancialStatementFinder()
+    lines, toc_pages, statement_pages = finder.extractContent(pdf_path)
+    
+    if statement_pages:
+        print(f"Found statement pages: {statement_pages}")
+        # Get the high confidence pages (>=50%)
+        high_conf_pages = finder.get_statement_pages()
+        print(f"High confidence pages (>=50%): {high_conf_pages}")
+        
+        # Convert to the format expected by extract_text
+        statement_pages_dict = {}
+        for stmt_type, pages in high_conf_pages.items():
+            if pages:  # Only add if we have pages
+                statement_pages_dict[stmt_type] = pages
+    else:
+        print("No statement pages found by final_find_fs.py")
+        statement_pages_dict = None
+    
+    # Step 2: Extract text using the found pages
+    print("\nStep 2: Extracting text from identified pages...")
     extractor = TextExtractor()
-    extractor.extract_text(pdf_path, process_numbers=True)
+    excel_path, extracted_data = extractor.extract_text(pdf_path, process_numbers=True, statement_pages=statement_pages_dict)
+    
+    if excel_path:
+        print(f"\nExtraction completed successfully!")
+        print(f"Excel file saved to: {excel_path}")
+    else:
+        print("\nExtraction failed!")
 
 if __name__ == "__main__":
     main()

@@ -851,7 +851,7 @@ class TemplateMatcher:
                 print(f"[SECTION ASSIGN] '{line['description']}' -> {assigned_section} ({debug_reason}) [confidence:{section_confidence}]")
             assigned.append({
                 'description': line['description'],
-                'value': line['numbers'][0] if line['numbers'] else None,
+                'value': line['numbers'],  # Keep all numbers, not just the first one
                 'section': assigned_section
             })
         
@@ -947,7 +947,7 @@ class TemplateMatcher:
                         self.extraction_logger.info(f"[SECTION ASSIGN] '{original_desc}' -> None (no_context)")
             assigned.append({
                 'description': line['description'],
-                'value': line['numbers'][0] if line['numbers'] else None,
+                'value': line['numbers'],  # Keep all numbers, not just the first one
                 'section': assigned_section
             })
         return assigned
@@ -1033,7 +1033,7 @@ class TemplateMatcher:
             
             assigned.append({
                 'description': line['description'],
-                'value': line['numbers'][0] if line['numbers'] else None,
+                'value': line['numbers'],  # Keep all numbers, not just the first one
                 'section': assigned_section
             })
         

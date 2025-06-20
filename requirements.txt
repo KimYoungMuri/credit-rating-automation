@@ -9,4 +9,5 @@ spacy>=3.7.0
 python-Levenshtein>=0.21.0
 fuzzywuzzy==0.18.0
 sentence-transformers>=2.5.0
-tenacity>=8.2.3 
+tenacity>=8.2.3
+scikit-learn 

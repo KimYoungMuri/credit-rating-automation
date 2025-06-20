@@ -4,8 +4,6 @@ from pathlib import Path
 import re 
 import sys
 from collections import defaultdict
-import torch
-from transformers import BertTokenizer, BertForSequenceClassification
 import os
 from typing import List, Optional, Tuple
 
@@ -884,16 +882,16 @@ class FinancialStatementFinder:
     def get_statement_pages(self) -> dict:
         """
         Returns a dictionary containing the page numbers for each type of financial statement.
-        Only includes pages with confidence score >= 80%.
+        Only includes pages with confidence score >= 50%.
         
         Returns:
             dict: A dictionary with keys 'balance_sheet', 'income_statement', 'cash_flow'
-                 and values as lists of page numbers with high confidence scores.
+                 and values as lists of page numbers with confidence scores >= 50%.
         """
         statement_pages = {}
         for stmt_type, pages in self.final_scores.items():
-            # Get pages with high confidence (>= 80%)
-            high_conf_pages = {page: score for page, score in pages.items() if score >= 80}
+            # Get pages with confidence >= 50%
+            high_conf_pages = {page: score for page, score in pages.items() if score >= 50}
             if high_conf_pages:
                 statement_pages[stmt_type] = sorted(high_conf_pages.keys())
         return statement_pages
@@ -903,8 +901,10 @@ def main():
         print("Usage: python final_find_fs.py <pdf_path>")
         return
 
-        filename = sys.argv[1]
-    input_dir = Path("input_pdfs")
+    filename = sys.argv[1]
+    # Use project root's input_pdfs directory
+    project_root = Path(__file__).resolve().parent.parent.parent
+    input_dir = project_root / "input_pdfs"
     input_dir.mkdir(exist_ok=True)
     path = str((input_dir / filename).resolve())
 
@@ -927,7 +927,7 @@ def main():
         
         # Print statement pages with high confidence
         statement_pages = finder.get_statement_pages()
-        print("\nHigh Confidence Statement Pages (>=80%):")
+        print("\nHigh Confidence Statement Pages (>=50%):")
         for stmt_type, pages in statement_pages.items():
             print(f"  {stmt_type.replace('_', ' ').title()}: {pages}")
             
