@@ -913,12 +913,10 @@ class TemplateMatcher:
             desc = normalize(line['description'])
             original_desc = line['description']
 
-            # Debug: print normalized description
-            print(f"[DEBUG IS] Normalized desc: '{desc}' (original: '{original_desc}')")
-
-            # Loosened regex for revenue lines
+            # Log normalized description and regex match to extraction.log
+            self.extraction_logger.info(f"[DEBUG IS] Normalized desc: '{desc}' (original: '{original_desc}')")
             revenue_match = re.search(r'(sales|revenue)', desc)
-            print(f"[DEBUG IS] Revenue regex match: {bool(revenue_match)} for '{desc}'")
+            self.extraction_logger.info(f"[DEBUG IS] Revenue regex match: {bool(revenue_match)} for '{desc}'")
             if revenue_match:
                 assigned_section = 'revenue'
                 current_section = assigned_section
