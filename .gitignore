@@ -37,7 +37,4 @@ env/
 table_extraction.log
 
 # Project specific
-input_pdfs/
 extracted_tables/
-# *.xlsx
-*.pdf 
