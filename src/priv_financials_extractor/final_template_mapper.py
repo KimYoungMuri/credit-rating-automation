@@ -223,7 +223,6 @@ class TemplateMatcher:
         r'^net\s+cash\s+(?:from|used\s+in|provided\s+by)',
         r'^total\s+(?:current|non[- ]?current)\s+(?:assets?|liabilities?)$',
         r'^total$',
-        r'^total\s+common\s+shareholders?\s+equity$',
         r'^total\s+shareholders?\s+equity$',
         r'^total\s+stockholders?\s+equity$',
         r'^total\s+debt$',
@@ -256,7 +255,7 @@ class TemplateMatcher:
         r'^total\s+paid[- ]in\s+capital$',
     ]
 
-    def __init__(self, model_name="all-MiniLM-L6-v2"):
+    def __init__(self, model_name="all-MiniLM-L6-v2", use_llm_fallback=True):
         """Initialize with Sentence Transformers model"""
         self.model = SentenceTransformer(model_name)
         self.setup_logging()
@@ -265,13 +264,16 @@ class TemplateMatcher:
         
         # Initialize LLM mapper for hybrid approach
         self.llm_mapper = LLMMapper()
-        self.use_llm = self.llm_mapper.check_ollama_available()
+        self.use_llm = use_llm_fallback and self.llm_mapper.check_ollama_available()
         if self.use_llm:
             print("✅ LLM mapper available - using hybrid approach")
         else:
-            print("⚠️  LLM mapper not available - using rule-based approach only")
-            print("   Install Ollama: https://ollama.ai/")
-            print("   Run: ollama pull mistral")
+            if not use_llm_fallback:
+                print("⚡ LLM disabled - using fast rule-based approach only")
+            else:
+                print("⚠️  LLM mapper not available - using rule-based approach only")
+                print("   Install Ollama: https://ollama.ai/")
+                print("   Run: ollama pull mistral")
         
     def setup_logging(self):
         """Setup logging configuration"""
@@ -328,7 +330,7 @@ class TemplateMatcher:
                 r'net\s+inventor(?:y|ies)'
             ],
             'Net PPE': [
-                r'property(?:\s+and\s+equipment)?(?:\s*[-—]\s*net)?',
+                r'property(?:\s+and\s+)?equipment(?:\s*[-—]\s*net)?',
                 r'(?:net\s+)?(?:ppe|property,?\s+plant\s+and\s+equipment)',
                 r'right\s+of\s+use\s+assets?',
                 r'finance\s+lease\s+assets?'
@@ -611,7 +613,7 @@ class TemplateMatcher:
 
     def assign_sections_by_context(self, extracted_lines: list) -> list:
         """
-        Assigns BS sections to each line item based on content and explicit headers.
+        Assigns BS sections to each line item based on content and explicit headers, using analyze_subsections for fallback.
         """
         assigned = []
         current_section = None
@@ -654,7 +656,22 @@ class TemplateMatcher:
                 for keyword, section in manual_map.items():
                     if keyword in desc_lower:
                         current_section = section
-                                break
+                        found_header = True
+                        break
+            
+            # 3. If still not found, use analyze_subsections for fallback
+            if not found_header or not current_section:
+                subsection = self.analyze_subsections(desc)
+                # Map subsection to section
+                subsection_map = {
+                    'Current Assets': 'current_assets',
+                    'Non-Current Assets': 'noncurrent_assets',
+                    'Current Liabilities': 'current_liabilities',
+                    'Non-Current Liabilities': 'noncurrent_liabilities',
+                    'Equity': 'equity'
+                }
+                if subsection in subsection_map:
+                    current_section = subsection_map[subsection]
             
             assigned.append({
                 'description': desc,
@@ -664,13 +681,117 @@ class TemplateMatcher:
         
         return assigned
 
+    def filter_out_totals_for_llm(self, bs_lines: List[dict]) -> Tuple[List[dict], List[dict]]:
+        """
+        Filter out total/subtotal items before sending to LLM for section assignment.
+        Returns (non_total_items, total_items).
+        """
+        non_total_items = []
+        total_items = []
+        
+        for line in bs_lines:
+            description = line.get('description', '')
+            if self.is_total_or_net_row(description):
+                total_items.append(line)
+            else:
+                non_total_items.append(line)
+        
+        if total_items:
+            print(f"[DEBUG] Filtered out {len(total_items)} total/subtotal items before LLM assignment:")
+            for item in total_items:
+                print(f"  - {item.get('description', '')}")
+        
+        return non_total_items, total_items
+
+    def assign_sections_with_llm(self, bs_lines: List[dict]) -> List[dict]:
+        """
+        Assigns BS sections using LLM in batches of 3 (chunked) for all items.
+        Pre-filters totals/subtotals before LLM assignment.
+        """
+        print("\n[DEBUG] Assigning sections using LLM (batch mode, chunked)...")
+        print(f"[DEBUG] Total items to process: {len(bs_lines)}")
+        assigned_lines = []
+        if not self.use_llm:
+            print("[INFO] LLM not available, falling back to rule-based section assignment.")
+            return self.assign_sections_by_context(bs_lines)
+
+        # Pre-filter totals/subtotals
+        non_total_items, total_items = self.filter_out_totals_for_llm(bs_lines)
+        print(f"[DEBUG] After filtering: {len(non_total_items)} non-total items, {len(total_items)} total items")
+        
+        chunk_size = 3
+        all_assignments = {}
+        
+        # Process non-total items with LLM
+        for i in range(0, len(non_total_items), chunk_size):
+            chunk = non_total_items[i:i + chunk_size]
+            descriptions = [line['description'] for line in chunk]
+            
+            print(f"\n[DEBUG] Processing chunk {i//chunk_size + 1}: {descriptions}")
+            
+            # Get LLM assignments for this chunk
+            chunk_assignments = self.llm_mapper.assign_sections_batch_with_llm(descriptions)
+            
+            if chunk_assignments:
+                print(f"[DEBUG] LLM batch assignment successful: {chunk_assignments}")
+                all_assignments.update(chunk_assignments)
+            else:
+                print(f"[WARN] LLM failed for chunk: {descriptions}. Falling back to rule-based for this chunk.")
+                # Fall back to rule-based for this chunk
+                for line in chunk:
+                    section = self.analyze_subsections(line['description'])
+                    all_assignments[line['description']] = section
+
+        # Process total items (assign to None or skip)
+        for line in total_items:
+            all_assignments[line['description']] = None
+
+        print(f"\n[DEBUG] Final assignments summary:")
+        print(f"[DEBUG] Total assignments: {len(all_assignments)}")
+        for desc, section in all_assignments.items():
+            print(f"[DEBUG] '{desc}' -> {section}")
+
+        # Assign sections to all items
+        for line in bs_lines:
+            desc = line['description']
+            section = None
+            source = "rule-based fallback"
+            
+            # Try to find exact match in LLM assignments
+            if desc in all_assignments:
+                section = all_assignments[desc]
+                source = "LLM"
+            else:
+                # Try fuzzy matching for minor differences
+                for llm_desc, llm_section in all_assignments.items():
+                    if self.get_similarity(desc, llm_desc) > 0.8:
+                        section = llm_section
+                        source = f"LLM (fuzzy match: \"{llm_desc}\")"
+                        break
+                
+                if section is None:
+                    # Fall back to rule-based
+                    section = self.analyze_subsections(desc)
+                    source = "rule-based fallback"
+            
+            # Create assigned line with proper value handling
+            assigned_line = {
+                'description': desc,
+                'idx': line.get('idx', 0),
+                'section': section,
+                'value': line.get('numbers', line.get('value', []))
+            }
+            assigned_lines.append(assigned_line)
+            
+            print(f"[SECTION ASSIGN] '{desc}' -> {section} [source: {source}]")
+
+        return assigned_lines
+
     def assign_sections_by_context_is(self, extracted_lines: list) -> list:
         """
         Assigns IS sections to each line item based on its content and context.
         Uses explicit header detection to improve accuracy.
         """
-        import re
-        
         assigned = []
         current_section = None # Start with no section
         
@@ -689,7 +810,7 @@ class TemplateMatcher:
             # --- 1. Detect section based on headers ---
             found_section = False
             for section, keywords in section_keywords.items():
-                if any(re.search(r'\\b' + keyword + r'\\b', desc_lower) for keyword in keywords):
+                if any(re.search(r'\b' + keyword + r'\b', desc_lower) for keyword in keywords):
                     current_section = section
                     found_section = True
                     break
@@ -701,11 +822,11 @@ class TemplateMatcher:
                     current_section = 'other_income_expense'
 
             # --- 3. Assign section ---
-                        assigned_section = current_section
+            assigned_section = current_section
             
             assigned.append({
                 'description': line['description'],
-                'value': line['numbers'],  # FIX: Was 'line'
+                'value': line.get('numbers', line.get('value', [])),  # Handle both 'numbers' and 'value' keys
                 'section': assigned_section
             })
         
@@ -801,7 +922,6 @@ class TemplateMatcher:
         skip_rows = {
             7: "Operating Expenses", 
             8: "Operating Income", 
-            16: "Income Before Taxes", 
             17: "Income Before Taxes",
             20: "Net Income"
         }
@@ -844,319 +964,7 @@ class TemplateMatcher:
         
         return {item: cfs_row_mapping.get(item) for item in template_items if item in cfs_row_mapping}
 
-    def map_to_template(self, extracted_data: Dict, template_path: str) -> str:
-        # Load the template workbook
-        shutil.copy(template_path, "temp_template.xlsx")
-        wb = load_workbook("temp_template.xlsx")
-
-        # Get sheets for BS, IS, CFS
-        bs_sheet = wb['BS']
-        is_cf_sheet = wb['IS.CF']
-
-        # Determine year columns from the template (assuming they are in B, C, D, E starting from row 6)
-        year_cols = {}
-        print("DEBUG: Starting year column detection...")
-        # Heuristic: Find years in row 6 of the Balance Sheet
-        for col_idx in range(2, 6): # Check columns B, C, D, E
-            cell_val = bs_sheet.cell(row=6, column=col_idx).value
-            col_letter = openpyxl.utils.get_column_letter(col_idx)
-            print(f"DEBUG: Checking column {col_letter} (row 6): {cell_val} (type: {type(cell_val)})")
-            
-            if isinstance(cell_val, int) and 1990 <= cell_val <= 2050:
-                year_cols[str(cell_val)] = col_letter
-                print(f"DEBUG: Found direct year {cell_val} in column {col_letter}")
-            elif isinstance(cell_val, str) and cell_val.startswith('='):
-                # Handle Excel formulas like "=B6+1" - extract the year
-                print(f"DEBUG: Found formula {cell_val}, attempting to parse...")
-                try:
-                    # Simple parsing for formulas like "=B6+1" where B6 contains 2020
-                    if '+1' in cell_val:
-                        base_cell = cell_val.split('+')[0][1:]  # Extract "B6" from "=B6+1"
-                        base_col = base_cell[0]  # "B"
-                        base_row = int(base_cell[1:])  # 6
-                        base_year = bs_sheet[f"{base_col}{base_row}"].value
-                        print(f"DEBUG: Base cell {base_col}{base_row} contains: {base_year}")
-                        if isinstance(base_year, int):
-                            # Calculate the year for this column
-                            col_offset = col_idx - openpyxl.utils.column_index_from_string(base_col)
-                            calculated_year = base_year + col_offset
-                            print(f"DEBUG: Calculated year: {base_year} + {col_offset} = {calculated_year}")
-                            if 1990 <= calculated_year <= 2050:
-                                year_cols[str(calculated_year)] = col_letter
-                                print(f"DEBUG: Found calculated year {calculated_year} in column {col_letter}")
-                except Exception as e:
-                    print(f"DEBUG: Error parsing formula {cell_val}: {e}")
-                    pass
-
-        if not year_cols:
-            print("ERROR: Could not determine year columns from template. Aborting.")
-            return ""
-
-        print(f"DEBUG: Found year columns in template: {year_cols}")
-
-        # --- Balance Sheet Mapping ---
-        if 'balance_sheet' in extracted_data:
-            print("\n--- Processing Balance Sheet ---")
-            
-            # --- Get Balance Sheet row maps ---
-            row_maps = {
-                'current_assets': self.get_bs_row_map(bs_sheet, 7, 12),
-                'noncurrent_assets': self.get_bs_row_map(bs_sheet, 15, 18),
-                'current_liabilities': self.get_bs_row_map(bs_sheet, 23, 28),
-                'noncurrent_liabilities': self.get_bs_row_map(bs_sheet, 31, 34),
-                'equity': self.get_bs_row_map(bs_sheet, 38, 41)
-            }
-            
-            for year, year_data in extracted_data['balance_sheet'].items():
-                if str(year) not in year_cols:
-                    print(f"Warning: Year {year} from PDF not found in template columns. Skipping.")
-                    continue
-                
-                col = year_cols[str(year)]
-                print(f"\n--- Mapping year {year} to column {col} ---")
-                
-                # Assign sections to all items for this year
-                # We need to convert the data to the format the section assigner expects
-                bs_lines_for_year = [{'description': d, 'numbers': [v]} for d, v in year_data.items()]
-                assigned_bs_lines = self.assign_sections_by_context(bs_lines_for_year)
-                
-                self.print_section_assignments(assigned_bs_lines, year, 'balance_sheet')
-
-                # Group items by their assigned section
-                section_data = defaultdict(list)
-                for item in assigned_bs_lines:
-                    # item is {'description': ..., 'value': [...], 'section': ...}
-                    if item.get('section') and item.get('value'):
-                        section_data[item['section']].append({
-                            'description': item['description'],
-                            'value': item['value'][0] # We process one year at a time
-                        })
-
-                # Map each section
-                for section, items in section_data.items():
-                    row_map = row_maps.get(section)
-                    if not row_map:
-                        print(f"Warning: No row map found for section '{section}'. Skipping.")
-                        continue
-                        
-                    template_items = list(row_map.keys())
-                    print(f"\n[DEBUG] Mapping section '{section}'. Template items: {template_items}")
-
-                    accumulated_values = defaultdict(float)
-                    other_sum = 0.0
-
-                    for entry in items:
-                        desc = entry['description']
-                        val_str = entry['value']
-                        if val_str is None: continue
-
-                        try:
-                            val = float(re.sub(r'[^\d\.-]', '', str(val_str)))
-                        except (ValueError, TypeError):
-                            print(f"Warning: Could not convert value to float for '{desc}': {val_str}")
-                            continue
-
-                        # Skip total/net rows from being mapped to specific items
-                        if self.is_total_or_net_row(desc):
-                            print(f"  [SKIP TOTAL] '{desc}' is a total/subtotal row.")
-                    continue
-                
-                        # Use the hybrid mapping function
-                        target_item, score, method = self.hybrid_map_item(desc, template_items, section, 'balance_sheet')
-
-                        if target_item and score >= 0.4:
-                            accumulated_values[target_item] += val
-                            print(f"  [ACCUMULATE HYBRID] '{desc}' ({val}) -> {section}::{target_item} [conf: {score:.2f}, method: {method}]")
-                            else:
-                            # If it's not a confident match, add it to 'Other' for this section
-                                    other_sum += val
-                            print(f"  [ACCUMULATE OTHER] '{desc}' ({val}) -> {section}::Other [best match: {target_item}, conf: {score:.2f}]")
-
-                    # Write accumulated values to template
-                    for t_item, total_val in accumulated_values.items():
-                        if t_item in row_map and total_val != 0:
-                            row_idx = row_map[t_item]
-                            bs_sheet[f"{col}{row_idx}"] = total_val
-                    
-                    # Write the sum of unmapped items to 'Other' for that section
-                    if 'Other' in row_map and other_sum != 0:
-                        row_idx = row_map['Other']
-                        # Add to existing value if any
-                        existing_val = bs_sheet[f"{col}{row_idx}"].value or 0
-                        if isinstance(existing_val, str): existing_val = 0
-                        bs_sheet[f"{col}{row_idx}"] = existing_val + other_sum
-                        print(f"    [OTHER SUM] Writing {other_sum} to '{section}::Other' in cell {col}{row_idx}")
-
-        # --- Income Statement Mapping ---
-        if 'income_statement' in extracted_data:
-            print("\n--- Processing Income Statement ---")
-            
-            # --- Get IS row map ---
-            is_row_map = self.get_is_row_map(is_cf_sheet)
-            
-            for year, year_data in extracted_data['income_statement'].items():
-                if str(year) not in year_cols:
-                    print(f"Warning: Year {year} from PDF not found in template columns. Skipping.")
-                    continue
-                
-                col = year_cols[str(year)]
-                print(f"\n--- Mapping year {year} to column {col} ---")
-
-                is_lines_for_year = [{'description': d, 'numbers': [v]} for d, v in year_data.items()]
-                assigned_is_lines = self.assign_sections_by_context_is(is_lines_for_year)
-                
-                self.print_section_assignments(assigned_is_lines, year, 'income_statement')
-                
-                section_data = defaultdict(list)
-                for item in assigned_is_lines:
-                    if item.get('section') and item.get('value'):
-                        section_data[item['section']].append({
-                            'description': item['description'],
-                            'value': item['value'][0]
-                        })
-
-                for section, items in section_data.items():
-                    template_items = IS_SECTION_TEMPLATE.get(section, {}).get('template', [])
-                    if not template_items: continue
-
-                    print(f"\n[DEBUG] Mapping IS section '{section}'. Template items: {template_items}")
-                    
-                    accumulated_values = defaultdict(float)
-                    other_sum = 0.0
-                    
-                    for entry in items:
-                        desc = entry['description']
-                        val_str = entry['value']
-                        if val_str is None: continue
-                        
-                        try:
-                            val = float(re.sub(r'[^\d\.-]', '', str(val_str)))
-                        except (ValueError, TypeError):
-                            continue
-                        
-                        if self.is_total_or_net_row(desc):
-                            print(f"  [SKIP TOTAL] '{desc}' is a total/subtotal row.")
-                            continue
-                        
-                        target_item, score, method = self.hybrid_map_item(desc, template_items, section, 'income_statement')
-                        
-                        if target_item and score >= 0.4:
-                            accumulated_values[target_item] += val
-                            print(f"  [ACCUMULATE HYBRID] '{desc}' ({val}) -> {section}::{target_item} [conf: {score:.2f}, method: {method}]")
-                            else:
-                                    other_sum += val
-                            print(f"  [ACCUMULATE OTHER] '{desc}' ({val}) -> {section}::Other")
-                    
-                    # Write values
-                    for t_item, total_val in accumulated_values.items():
-                        if t_item in is_row_map:
-                            row_idx = is_row_map[t_item]
-                            is_cf_sheet[f"{col}{row_idx}"] = total_val
-                    
-                    # Write 'Other' sum
-                    other_category_name = self.get_other_category_for_is_section(section)
-                    if other_category_name and other_category_name in is_row_map and other_sum != 0:
-                        row_idx = is_row_map[other_category_name]
-                        existing_val = is_cf_sheet[f"{col}{row_idx}"].value or 0
-                        if isinstance(existing_val, str): existing_val = 0
-                        is_cf_sheet[f"{col}{row_idx}"] = existing_val + other_sum
-                        print(f"    [OTHER SUM] Writing {other_sum} to '{other_category_name}' in cell {col}{row_idx}")
-
-        # --- Cash Flow Statement Mapping ---
-        if 'cash_flow' in extracted_data:
-            print("\n--- Processing Cash Flow Statement ---")
-            
-            cfs_row_map = self.get_cfs_row_map(is_cf_sheet)
-
-            for year, year_data in extracted_data['cash_flow'].items():
-                if str(year) not in year_cols:
-                    continue
-                
-                col = year_cols[str(year)]
-                print(f"\n--- Mapping year {year} to column {col} ---")
-                
-                cfs_lines_for_year = [{'description': d, 'numbers': [v]} for d, v in year_data.items()]
-                assigned_cfs_lines = self.assign_sections_by_context_cfs(cfs_lines_for_year)
-                
-                self.print_section_assignments(assigned_cfs_lines, year, 'cash_flow')
-                
-                section_data = defaultdict(list)
-                for item in assigned_cfs_lines:
-                    if item.get('section') and item.get('value'):
-                        section_data[item['section']].append({
-                            'description': item['description'],
-                            'value': item['value'][0]
-                        })
-                
-                for section, items in section_data.items():
-                    template_items = CFS_SECTION_TEMPLATE.get(section, {}).get('template', [])
-                    if not template_items: continue
-                    
-                    print(f"\n[DEBUG] Mapping CFS section '{section}'. Template items: {template_items}")
-                    
-                    accumulated_values = defaultdict(float)
-                    other_sum = 0.0
-
-                    for entry in items:
-                        desc = entry['description']
-                        val_str = entry['value']
-                        if val_str is None: continue
-                        
-                        try:
-                            val = float(re.sub(r'[^\d\.-]', '', str(val_str)))
-                        except (ValueError, TypeError): continue
-                        
-                        if self.is_total_or_net_row(desc):
-                            print(f"  [SKIP TOTAL] '{desc}' is a total/subtotal row.")
-                            continue
-                        
-                        target_item, score, method = self.hybrid_map_item(desc, template_items, section, 'cash_flow')
-                        
-                        if target_item and score >= 0.4:
-                            accumulated_values[target_item] += val
-                            print(f"  [ACCUMULATE HYBRID] '{desc}' ({val}) -> {section}::{target_item} [conf: {score:.2f}, method: {method}]")
-                            else:
-                                    other_sum += val
-                            print(f"  [ACCUMULATE OTHER] '{desc}' ({val}) -> {section}::Other")
-                    
-                    # Write values
-                    for t_item, total_val in accumulated_values.items():
-                        if t_item in cfs_row_map:
-                            row_idx = cfs_row_map[t_item]
-                            is_cf_sheet[f"{col}{row_idx}"] = total_val
-                            
-                    # Write 'Other' sum
-                    other_category_name = self.get_other_category_for_cfs_section(section)
-                    if other_category_name and other_category_name in cfs_row_map and other_sum != 0:
-                        row_idx = cfs_row_map[other_category_name]
-                        existing_val = is_cf_sheet[f"{col}{row_idx}"].value or 0
-                        if isinstance(existing_val, str): existing_val = 0
-                        is_cf_sheet[f"{col}{row_idx}"] = existing_val + other_sum
-                        print(f"    [OTHER SUM] Writing {other_sum} to '{other_category_name}' in cell {col}{row_idx}")
-
-        # Save the populated template
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        current_dir = Path(__file__).resolve().parent
-        project_root = current_dir.parent.parent
-        output_dir = project_root / "output_excel"
-        output_dir.mkdir(exist_ok=True)
-        
-        populated_template_path = output_dir / f"populated_template_{timestamp}.xlsx"
-        wb.save(populated_template_path)
-        Path("temp_template.xlsx").unlink()
-        print(f"\nTemplate populated and saved to: {populated_template_path}")
-        return str(populated_template_path)
-
-    def get_bs_row_map(self, sheet, start_row, end_row):
-        """Helper to get row map for a BS section."""
-        row_map = {}
-        for row in range(start_row, end_row + 1):
-            cell_val = sheet.cell(row=row, column=1).value
-            if cell_val:
-                row_map[cell_val] = row
-        return row_map
-    
-    def get_is_row_map(self, sheet):
+    def get_is_row_map_full(self, sheet):
         """Helper to get row map for the entire IS."""
         row_map = {}
         # Iterate over all defined IS sections and their templates
@@ -1169,7 +977,7 @@ class TemplateMatcher:
                         break
         return row_map
         
-    def get_cfs_row_map(self, sheet):
+    def get_cfs_row_map_full(self, sheet):
         """Helper to get row map for the entire CFS."""
         row_map = {}
         for section_info in CFS_SECTION_TEMPLATE.values():
@@ -1179,7 +987,7 @@ class TemplateMatcher:
                         row_map[item] = row
                         break
         return row_map
-        
+
     def get_other_category_for_is_section(self, section: str) -> Optional[str]:
         if section == 'operating_expenses': return 'Other Operating Expenses'
         if section == 'other_income_expense': return 'Other Income/Expense'
@@ -1197,29 +1005,45 @@ class TemplateMatcher:
             print(f"  {entry['description']}  -->  {entry['section']}  (value: {entry['value']})")
 
     def is_total_or_net_row(self, description: str) -> bool:
-        """Check if description is a total or net row"""
-        import re
-        desc_lower = description.lower()
-        detail_lines = [
-            'other current assets',
-            'other noncurrent assets', 
-            'other current liabilities',
-            'other noncurrent liabilities',
-            'other'
+        """Check if description is a total or net row (expanded and strict)."""
+        desc_lower = description.lower().strip()
+        # Expanded patterns for totals/subtotals
+        total_patterns = [
+            r'^total(\s|$)',
+            r'(\s|^)total\s',
+            r'(\s|^)sum(\s|$)',
+            r'(\s|^)subtotal(\s|$)',
+            r'(\s|^)net(\s|$)',
+            r'(\s|^)aggregate(\s|$)',
+            r'(\s|^)grand total(\s|$)',
+            r'(\s|^)overall(\s|$)',
+            r'(\s|^)balance(\s|$)',
+            r'(\s|^)ending balance(\s|$)',
+            r'(\s|^)beginning balance(\s|$)',
+            r'(\s|^)ending cash(\s|$)',
+            r'(\s|^)starting cash(\s|$)',
+            r'(\s|^)net change(\s|$)',
+            r'(\s|^)net increase(\s|$)',
+            r'(\s|^)net decrease(\s|$)'
         ]
-        if any(detail in desc_lower for detail in detail_lines):
-            return False
-        return any(re.search(pattern, desc_lower) for pattern in self.TOTAL_NET_PATTERNS)
+        for pat in total_patterns:
+            if re.search(pat, desc_lower):
+                return True
+        # Also catch if the description is just a number or empty
+        if desc_lower in ('', '-', 'n/a', 'na', 'none'):
+            return True
+        return False
 
     def apply_rule_based_mapping(self, description: str) -> tuple[str, float]:
         """Apply rule-based mapping for balance sheet items"""
         import re
         desc_lower = description.lower()
         
-        # Balance sheet rule-based mapping
+        # Balance sheet rule-based mapping - EXPANDED
         bs_rules = {
             r'cash\s+(?:and\s+)?(?:cash\s+)?equivalents?': 'Cash and equivalents',
             r'accounts?\s+receivable(?:[—-]net)?': 'Accounts Receivable',
+            r'notes?\s+receivable': 'Accounts Receivable',  # Added
             r'prepaid\s+expenses?': 'Prepaid Expenses',
             r'inventor(?:y|ies)(?:[—-]net)?': 'Inventory',
             r'property\s+(?:and\s+)?equipment(?:[—-]net)?': 'Net PPE',
@@ -1232,7 +1056,24 @@ class TemplateMatcher:
             r'deferred\s+income\s+taxes?': 'Deferred income taxes',
             r'common\s+stock': 'Common Stock',
             r'retained\s+earnings?': 'Retained Earnings',
-            r'paid[- ]in\s+capital': 'Paid in Capital'
+            r'paid[- ]in\s+capital': 'Paid in Capital',
+            # Additional patterns for common items
+            r'margin\s+deposits?': 'Investments',  # Added
+            r'derivative\s+assets?': 'Investments',  # Added
+            r'derivative\s+liabilities?': 'Other',  # Added
+            r'right\s+of\s+use\s+assets?': 'Net PPE',  # Added
+            r'finance\s+lease\s+assets?': 'Net PPE',  # Added
+            r'finance\s+lease\s+liability': 'Long Term Debt',  # Added
+            r'operating\s+lease\s+liability': 'Long Term Debt',  # Added
+            r'current\s+portion\s+of\s+long[- ]term\s+debt': 'Current Portion of Long Term Debt',  # Added
+            r'revolving\s+lines?\s+of\s+credit': 'Short term Borrowing',  # Added
+            r'long[- ]term\s+incentive': 'Other',  # Added
+            r'deferred\s+compensation': 'Other',  # Added
+            r'contingent\s+consideration': 'Other',  # Added
+            r'subchapter\s+s\s+income\s+tax': 'Other',  # Added
+            r'noncontrolling\s+interests?': 'Other',  # Added
+            r'other\s+(?:current|noncurrent)\s+assets?': 'Other',  # Added
+            r'other\s+(?:current|noncurrent)\s+liabilities?': 'Other',  # Added
         }
         
         for pattern, template_item in bs_rules.items():
@@ -1312,13 +1153,14 @@ class TemplateMatcher:
             print(f"Error in semantic matching: {e}")
             return None, 0.0
 
-    def hybrid_map_item(self, description: str, template_items: List[str], 
-                       section_context: str, statement_type: str) -> Tuple[Optional[str], float, str]:
+    def hybrid_map_item_decoupled(self, description: str, template_items: List[str], 
+                                 section_context: str, statement_type: str) -> Tuple[Optional[str], float, str]:
         """
-        Hybrid mapping approach: rule-based first, then LLM for low confidence.
-        Returns (template_item, confidence_score, method_used)
+        Decoupled hybrid mapping: try rule-based first regardless of section assignment,
+        then LLM only if rule-based fails. This prevents LLM section misassignment from
+        affecting template mapping accuracy.
         """
-        # Step 1: Try rule-based mapping first
+        # Step 1: Always try rule-based mapping first (most reliable for standard items)
         if statement_type == 'balance_sheet':
             rule_match, rule_confidence = self.apply_rule_based_mapping(description)
         elif statement_type == 'income_statement':
@@ -1328,33 +1170,677 @@ class TemplateMatcher:
         else:
             rule_match, rule_confidence = None, 0.0
         
-        # If rule-based gives high confidence, use it
-        if rule_match and rule_confidence >= 0.7:
+        # If rule-based found a good match, use it
+        if rule_match and rule_confidence >= 0.6:
             return rule_match, rule_confidence, "rule_based"
         
         # Step 2: Try semantic matching
-        semantic_match, semantic_score = self.get_semantic_match(description, template_items, section_context)
+        semantic_match, semantic_confidence = self.get_semantic_match(description, template_items, section_context)
+        if semantic_match and semantic_confidence >= 0.7:
+            return semantic_match, semantic_confidence, "semantic"
         
-        # If semantic gives high confidence, use it
-        if semantic_match and semantic_score >= 0.6:
-            return semantic_match, semantic_score, "semantic"
-        
-        # Step 3: Use LLM as tie-breaker for low confidence cases
-        if self.use_llm and (rule_confidence < 0.5 or semantic_score < 0.5):
+        # Step 3: Only use LLM if rule-based and semantic both failed
+        if self.use_llm:
             llm_match, llm_confidence, reasoning = self.llm_mapper.map_with_llm(
                 description, template_items, section_context, statement_type
             )
-            
-            if llm_match and llm_confidence > 0.4:
-                return llm_match, llm_confidence, f"llm: {reasoning}"
+            if llm_match and llm_confidence >= 0.5:
+                return llm_match, llm_confidence, f"llm_fallback: {reasoning}"
         
-        # Step 4: Return best available option
-        if rule_match and rule_confidence > semantic_score:
-            return rule_match, rule_confidence, "rule_based_fallback"
-        elif semantic_match:
-            return semantic_match, semantic_score, "semantic_fallback"
-        else:
-            return None, 0.0, "no_match"
+        # Step 4: If all else fails, return None (will be added to "Other")
+        return None, 0.0, "no_match"
+
+    def map_balance_sheet_decoupled(self, extracted_data: Dict, template_path: str) -> str:
+        """
+        Decoupled balance sheet mapping: section assignment and template mapping are separate.
+        This allows correct template mapping even if section assignment is wrong.
+        """
+        # Load template
+        workbook = openpyxl.load_workbook(template_path)
+        bs_sheet = workbook["Balance Sheet"]
+        
+        # Get year columns
+        year_cols = self.get_year_columns(bs_sheet)
+        years = list(year_cols.keys())
+        
+        # Extract balance sheet data
+        bs_data = extracted_data.get('balance_sheet', {})
+        if not bs_data:
+            print("No balance sheet data found")
+            return template_path
+        
+        # Convert to list format for processing
+        bs_lines = []
+        for year in years:
+            year_data = bs_data.get(year, [])
+            for item in year_data:
+                bs_lines.append({
+                    'description': item.get('description', ''),
+                    'idx': item.get('idx', 0),
+                    'numbers': item.get('numbers', []),
+                    'year': year
+                })
+        
+        # Step 1: Assign sections (this can be wrong, but we'll handle it)
+        assigned_lines = self.assign_sections_with_llm(bs_lines)
+        
+        # Step 2: Group by section for mapping
+        section_data = {}
+        for line in assigned_lines:
+            section = line.get('section')
+            if section:
+                if section not in section_data:
+                    section_data[section] = []
+                section_data[section].append(line)
+        
+        # Step 3: Map each section using decoupled approach
+        for section, items in section_data.items():
+            print(f"\n[DEBUG] Mapping section '{section}' with decoupled approach...")
+            
+            # Get template items for this section
+            row_map = self.get_bs_row_map(bs_sheet, *self.get_section_row_range(section))
+            if not row_map:
+                print(f"Warning: No row map found for section '{section}'")
+                continue
+            
+            template_items = list(row_map.keys())
+            print(f"[DEBUG] Template items for {section}: {template_items}")
+            
+            # Map each item using decoupled approach
+            for item in items:
+                desc = item['description']
+                numbers = item.get('numbers', [])
+                
+                # Skip totals (should have been filtered, but double-check)
+                if self.is_total_or_net_row(desc):
+                    print(f"  [SKIP TOTAL] '{desc}' is a total/subtotal row.")
+                    continue
+                
+                # Use decoupled mapping (ignores section assignment)
+                template_item, confidence, method = self.hybrid_map_item_decoupled(
+                    desc, template_items, section, 'balance_sheet'
+                )
+                
+                if template_item:
+                    print(f"  [MAP-DECOUPLED] '{desc}' -> {template_item} (confidence: {confidence:.2f}, method: {method})")
+                    # Write to template (implementation depends on your existing logic)
+                    # ... (continue with existing mapping logic)
+                else:
+                    print(f"  [MAP-OTHER] '{desc}' -> Other (no match found)")
+                    # Add to "Other" category
+                    # ... (continue with existing logic)
+        
+        # Save and return
+        workbook.save(template_path)
+        return template_path
+
+    def get_section_row_range(self, section: str) -> Tuple[int, int]:
+        """Get the row range for a given section."""
+        ranges = {
+            'current_assets': (7, 13),
+            'noncurrent_assets': (16, 19),
+            'current_liabilities': (24, 29),
+            'noncurrent_liabilities': (31, 34),
+            'equity': (38, 43)
+        }
+        return ranges.get(section, (1, 1))
+
+    def map_to_template(self, extracted_data: Dict, template_path: str) -> str:
+        # Load the template workbook
+        shutil.copy(template_path, "temp_template.xlsx")
+        wb = load_workbook("temp_template.xlsx")
+
+        # Get sheets for BS, IS, CFS
+        bs_sheet = wb['BS']
+        is_cf_sheet = wb['IS.CF']
+
+        # Determine year columns from the template (assuming they are in B, C, D, E starting from row 6)
+        year_cols = {}
+        print("DEBUG: Starting year column detection...")
+        # Heuristic: Find years in row 6 of the Balance Sheet
+        for col_idx in range(2, 6): # Check columns B, C, D, E
+            cell_val = bs_sheet.cell(row=6, column=col_idx).value
+            col_letter = openpyxl.utils.get_column_letter(col_idx)
+            print(f"DEBUG: Checking column {col_letter} (row 6): {cell_val} (type: {type(cell_val)})")
+            
+            if isinstance(cell_val, int) and 1990 <= cell_val <= 2050:
+                year_cols[str(cell_val)] = col_letter
+                print(f"DEBUG: Found direct year {cell_val} in column {col_letter}")
+            elif isinstance(cell_val, str) and cell_val.startswith('='):
+                # Handle Excel formulas like "=B6+1" - extract the year
+                print(f"DEBUG: Found formula {cell_val}, attempting to parse...")
+                try:
+                    # Simple parsing for formulas like "=B6+1" where B6 contains 2020
+                    if '+1' in cell_val:
+                        base_cell = cell_val.split('+')[0][1:]  # Extract "B6" from "=B6+1"
+                        base_col = base_cell[0]  # "B"
+                        base_row = int(base_cell[1:])  # 6
+                        base_year = bs_sheet[f"{base_col}{base_row}"].value
+                        print(f"DEBUG: Base cell {base_col}{base_row} contains: {base_year}")
+                        if isinstance(base_year, int):
+                            # Calculate the year for this column
+                            col_offset = col_idx - openpyxl.utils.column_index_from_string(base_col)
+                            calculated_year = base_year + col_offset
+                            print(f"DEBUG: Calculated year: {base_year} + {col_offset} = {calculated_year}")
+                            if 1990 <= calculated_year <= 2050:
+                                year_cols[str(calculated_year)] = col_letter
+                                print(f"DEBUG: Found calculated year {calculated_year} in column {col_letter}")
+                except Exception as e:
+                    print(f"DEBUG: Error parsing formula {cell_val}: {e}")
+                    pass
+
+        if not year_cols:
+            print("ERROR: Could not determine year columns from template. Aborting.")
+            return ""
+
+        print(f"DEBUG: Found year columns in template: {year_cols}")
+
+        # Map extracted years to template years if they don't match
+        template_years = list(year_cols.keys())
+        year_mapping = {}
+        
+        # Check if we need to map years
+        if 'balance_sheet' in extracted_data:
+            extracted_years = list(extracted_data['balance_sheet'].keys())
+            print(f"[DEBUG] Extracted years: {extracted_years}")
+            print(f"[DEBUG] Template years: {template_years}")
+            
+            if set(extracted_years) != set(template_years):
+                print(f"[DEBUG] Year mismatch detected. Mapping extracted years to template years...")
+                # Map extracted years to template years (first to first, second to second, etc.)
+                for i, extracted_year in enumerate(extracted_years):
+                    if i < len(template_years):
+                        template_year = template_years[i]
+                        year_mapping[extracted_year] = template_year
+                        print(f"[DEBUG] Mapping {extracted_year} -> {template_year}")
+                    else:
+                        print(f"[DEBUG] Warning: No template year available for {extracted_year}")
+            else:
+                # Years match, create direct mapping
+                year_mapping = {year: year for year in extracted_years}
+                print(f"[DEBUG] Years match, using direct mapping")
+        
+        print(f"[DEBUG] Final year mapping: {year_mapping}")
+
+        # --- Balance Sheet Mapping ---
+        if 'balance_sheet' in extracted_data:
+            print("\n--- Processing Balance Sheet ---")
+            print(f"[DEBUG] Template year columns: {year_cols}")
+            print(f"[DEBUG] Extracted balance sheet years: {list(extracted_data['balance_sheet'].keys())}")
+            
+            # --- Get Balance Sheet row maps ---
+            # Updated row ranges to match the template screenshots
+            row_maps = {
+                'current_assets': self.get_bs_row_map(bs_sheet, 7, 13),           # Includes 'Other' at 12, Total at 13
+                'noncurrent_assets': self.get_bs_row_map(bs_sheet, 16, 19),      # Includes 'Other' at 18, Total at 19
+                'current_liabilities': self.get_bs_row_map(bs_sheet, 24, 29),    # Includes 'Other' at 28, Total at 29
+                'noncurrent_liabilities': self.get_bs_row_map(bs_sheet, 31, 34), # Includes 'Other' at 33, Total at 34
+                'equity': self.get_bs_row_map(bs_sheet, 38, 43)                  # Includes 'Other' at 42, Total at 43
+            }
+            # NOTE: If you update the template, update these row ranges accordingly.
+
+            # Collect all years and columns
+            years = [str(y) for y in extracted_data['balance_sheet'].keys() if str(y) in year_cols]
+            if not years:
+                print("Warning: No matching years found in template columns for balance sheet.")
+            
+            # Use year mapping instead of direct year matching
+            mapped_years = []
+            for extracted_year in extracted_data['balance_sheet'].keys():
+                if extracted_year in year_mapping:
+                    mapped_year = year_mapping[extracted_year]
+                    if mapped_year in year_cols:
+                        mapped_years.append(mapped_year)
+                        print(f"[DEBUG] Using mapped year: {extracted_year} -> {mapped_year}")
+            
+            if not mapped_years:
+                print("Warning: No years could be mapped to template columns for balance sheet.")
+                return template_path
+            
+            years = mapped_years
+            print(f"[DEBUG] Processing balance sheet for mapped years: {years}")
+            
+            # Build a dict: {desc: {year: value}}
+            item_year_values = defaultdict(dict)
+            for extracted_year, mapped_year in year_mapping.items():
+                if mapped_year in year_cols:
+                    for desc, val in extracted_data['balance_sheet'][extracted_year].items():
+                        item_year_values[desc][mapped_year] = val
+
+            # Assign sections to all items (once, using the first available year for values)
+            bs_lines = [{'description': d, 'numbers': [next(iter(v.values()))]} for d, v in item_year_values.items()]
+            assigned_bs_lines = self.assign_sections_with_llm(bs_lines)
+            self.print_section_assignments(assigned_bs_lines, ','.join(years), 'balance_sheet')
+
+            # Track used items to prevent double counting
+            used_items = set()
+            
+            # Group items by their assigned section
+            section_data = defaultdict(list)
+            for idx, item in enumerate(assigned_bs_lines):
+                if item.get('section'):
+                    section_data[item['section']].append({
+                        'description': item['description'],
+                        'idx': idx  # Keep index to map back to item_year_values
+                    })
+
+            # Map each section
+            for section, items in section_data.items():
+                # --- Print all items assigned to each section before mapping ---
+                print(f"\n[DEBUG] Items assigned to section '{section}':")
+                for entry in items:
+                    desc = entry['description']
+                    idx = entry['idx']
+                    year_vals = item_year_values[desc]
+                    print(f"  - {desc}: {year_vals}")
+
+                row_map = row_maps.get(section)
+                if not row_map:
+                    print(f"Warning: No row map found for section '{section}'. Skipping.")
+                    continue
+                template_items = list(row_map.keys())
+                print(f"\n[DEBUG] Mapping section '{section}'. Template items: {template_items}")
+
+                # Track which items are mapped to which template row (for double-counting check)
+                item_to_template = defaultdict(list)
+                template_to_items = defaultdict(list)
+                other_items = defaultdict(list)  # year -> list of (desc, value)
+
+                # Track accumulated values for this section to prevent double counting
+                section_accumulated = defaultdict(float)
+                section_other_sum = defaultdict(float)  # Track by year
+
+                # For each item, map to template and write values for all years
+                for entry in items:
+                    desc = entry['description']
+                    if desc in used_items:
+                        print(f"  [SKIP USED] '{desc}' already mapped.")
+                        continue
+                    if self.is_total_or_net_row(desc):
+                        print(f"  [SKIP TOTAL] '{desc}' is a total/subtotal row.")
+                        continue
+                    idx = entry['idx']
+                    year_vals = item_year_values[desc]
+                    target_item, score, method = self.hybrid_map_item_decoupled(
+                        desc, template_items, section, 'balance_sheet'
+                    )
+                    if target_item and score >= 0.4:
+                        used_items.add(desc)
+                        for year, val in year_vals.items():
+                            if str(year) in year_cols:
+                                try:
+                                    val_float = float(re.sub(r'[^\d\.-]', '', str(val)))
+                                except (ValueError, TypeError):
+                                    print(f"Warning: Could not convert value to float for '{desc}': {val}")
+                                    continue
+                                section_accumulated[f"{target_item}_{year}"] += val_float
+                                item_to_template[desc].append((target_item, year, val_float))
+                                template_to_items[(target_item, year)].append((desc, val_float))
+                                self.log_mapping_decision(desc, year, section, target_item, val_float, method, "ACCUMULATE HYBRID")
+                    else:
+                        for year, val in year_vals.items():
+                            if str(year) in year_cols:
+                                try:
+                                    val_float = float(re.sub(r'[^\d\.-]', '', str(val)))
+                                except (ValueError, TypeError):
+                                    continue
+                                section_other_sum[year] += val_float
+                                other_items[year].append((desc, val_float))
+                                self.log_mapping_decision(desc, year, section, 'Other', val_float, method, "ACCUMULATE OTHER")
+                        used_items.add(desc)
+
+                # --- Print mapping summary for this section ---
+                print(f"\n[DEBUG] Mapping summary for section '{section}':")
+                for (target_item, year), items_list in template_to_items.items():
+                    total = sum(val for _, val in items_list)
+                    print(f"  {target_item} [{year}]: {total} (from: {[desc for desc, _ in items_list]})")
+                for year, items_list in other_items.items():
+                    total = sum(val for _, val in items_list)
+                    print(f"  Other [{year}]: {total} (from: {[desc for desc, _ in items_list]})")
+
+                # --- Double-counting check ---
+                # Only warn if an item is mapped to more than one template row for the SAME year
+                for desc, mappings in item_to_template.items():
+                    year_targets = [(target, year) for (target, year, _) in mappings]
+                    # Count how many unique (target, year) pairs there are
+                    year_target_counts = {}
+                    for target, year in year_targets:
+                        year_target_counts.setdefault(year, set()).add(target)
+                    for year, targets in year_target_counts.items():
+                        if len(targets) > 1:
+                            print(f"[WARNING] Double-counted item: '{desc}' mapped to multiple template rows {targets} for year {year}")
+
+                # Write accumulated values to template
+                for key, total_val in section_accumulated.items():
+                    if total_val != 0:
+                        target_item, year = key.rsplit('_', 1)
+                        if target_item in row_map and str(year) in year_cols:
+                            col = year_cols[str(year)]
+                            row_idx = row_map[target_item]
+                            bs_sheet[f"{col}{row_idx}"] = total_val
+                            self.log_mapping_decision(desc, year, section, target_item, total_val, method, "WRITE")
+
+                # Write 'Other' sums for this section
+                # Ensure 'Other' is included in the equity row map as well
+                if 'Other' in row_map:
+                    for year, other_sum in section_other_sum.items():
+                        if other_sum != 0 and str(year) in year_cols:
+                            col = year_cols[str(year)]
+                            row_idx = row_map['Other']
+                            existing_val = bs_sheet[f"{col}{row_idx}"].value or 0
+                            if isinstance(existing_val, str): existing_val = 0
+                            bs_sheet[f"{col}{row_idx}"] = existing_val + other_sum
+                            self.log_mapping_decision(desc, year, section, 'Other', other_sum, method, "OTHER SUM")
+
+                # --- After writing, print sum check for each section and year ---
+                for year in years:
+                    mapped_sum = 0
+                    for t_item in template_items:
+                        if t_item in row_map and str(year) in year_cols:
+                            col = year_cols[str(year)]
+                            row_idx = row_map[t_item]
+                            val = bs_sheet[f"{col}{row_idx}"].value
+                            try:
+                                mapped_sum += float(val) if val not in [None, ''] else 0
+                            except (ValueError, TypeError):
+                                continue
+                    # Find template total row (e.g., 'Total Current Assets')
+                    total_row = None
+                    for t_item in template_items:
+                        if t_item.lower().startswith('total'):
+                            total_row = row_map[t_item]
+                            break
+                    template_total = None
+                    if total_row and str(year) in year_cols:
+                        col = year_cols[str(year)]
+                        template_total = bs_sheet[f"{col}{total_row}"].value
+                    # Only check if template_total is a number (not a formula)
+                    if template_total is not None and isinstance(template_total, str) and template_total.strip().startswith('='):
+                        self.extraction_logger.info(f"[CHECK] Section '{section}' [{year}]: template total is a formula ('{template_total}'), skipping numeric check.")
+                        print(f"[CHECK] Section '{section}' [{year}]: template total is a formula ('{template_total}'), skipping numeric check.")
+                        ok = None
+                    else:
+                        try:
+                            ok = (template_total is not None and abs(mapped_sum - float(template_total)) < 1e-2)
+                        except (ValueError, TypeError):
+                            ok = None
+                    self.log_section_sum_check(section, year, mapped_sum, template_total, ok)
+
+            # --- For equity section, print all items considered and mapping reasons ---
+            print(f"\n[DEBUG] Equity section analysis:")
+            for entry in section_data.get('equity', []):
+                desc = entry['description']
+                idx = entry['idx']
+                year_vals = item_year_values[desc]
+                print(f"  - {desc}: {year_vals}")
+
+        # --- Process Income Statement ---
+        if 'income_statement' in extracted_data:
+            print("\n--- Processing Income Statement ---")
+            print(f"[DEBUG] Template year columns: {year_cols}")
+            print(f"[DEBUG] Extracted income statement years: {list(extracted_data['income_statement'].keys())}")
+            is_data = extracted_data['income_statement']
+            print(f"[DEBUG] IS data structure: {type(is_data)}")
+            print(f"[DEBUG] IS data keys: {list(is_data.keys()) if isinstance(is_data, dict) else 'Not a dict'}")
+            
+            # Get IS row maps
+            is_row_maps = {
+                'revenue': self.get_is_row_map(is_cf_sheet, 'revenue'),
+                'operating_expenses': self.get_is_row_map(is_cf_sheet, 'operating_expenses'),
+                'operating_income': self.get_is_row_map(is_cf_sheet, 'operating_income'),
+                'other_income_expense': self.get_is_row_map(is_cf_sheet, 'other_income_expense'),
+                'tax_net_income': self.get_is_row_map(is_cf_sheet, 'tax_net_income')
+            }
+            
+            # Debug: Print available template items
+            print(f"[DEBUG] Available IS template items:")
+            for section, row_map in is_row_maps.items():
+                print(f"  {section}: {list(row_map.keys()) if row_map else 'No items'}")
+            
+            # Process each year
+            for extracted_year in is_data.keys():
+                if extracted_year not in year_mapping:
+                    print(f"[DEBUG] Skipping IS year {extracted_year} - not in year mapping")
+                    continue
+                    
+                mapped_year = year_mapping[extracted_year]
+                if mapped_year not in year_cols:
+                    print(f"[DEBUG] Skipping IS year {extracted_year} -> {mapped_year} - not in template")
+                    continue
+                    
+                col = year_cols[mapped_year]
+                year_data = is_data[extracted_year]
+                print(f"[DEBUG] IS year {extracted_year} -> {mapped_year} data: {type(year_data)}, length: {len(year_data) if isinstance(year_data, dict) else 'N/A'}")
+                
+                if not isinstance(year_data, dict):
+                    print(f"[WARN] IS year {extracted_year} data is not a dict, skipping")
+                    continue
+                
+                print(f"\n[DEBUG] Processing IS for year {extracted_year} -> {mapped_year}:")
+                for desc, val in year_data.items():
+                    print(f"[DEBUG] IS item: '{desc}' -> {val} (type: {type(val)})")
+                    
+                    # Handle different value types
+                    if isinstance(val, list):
+                        numbers = val
+                    elif isinstance(val, (int, float, str)):
+                        numbers = [val]
+                    else:
+                        print(f"[WARN] Unknown IS value type: {type(val)}, skipping")
+                        continue
+                    
+                    if not numbers:
+                        continue
+                    
+                    try:
+                        val_float = float(re.sub(r'[^\d\.-]', '', str(numbers[0])))
+                    except (ValueError, TypeError):
+                        print(f"[WARN] Could not convert IS value to float: {numbers[0]}")
+                        continue
+                    
+                    # Skip totals
+                    if self.is_total_or_net_row(desc):
+                        print(f"  [SKIP TOTAL] '{desc}' is a total/subtotal row.")
+                        continue
+                    
+                    # Try to map to IS sections
+                    mapped = False
+                    for section, row_map in is_row_maps.items():
+                        if not row_map:
+                            continue
+                        
+                        template_items = list(row_map.keys())
+                        target_item, score, method = self.hybrid_map_item_decoupled(
+                            desc, template_items, section, 'income_statement'
+                        )
+                        
+                        if target_item and score >= 0.4:
+                            if target_item in row_map:
+                                row_idx = row_map[target_item]
+                                is_cf_sheet[f"{col}{row_idx}"] = val_float
+                                print(f"  [MAP-IS] '{desc}' -> {section}::{target_item} ({val_float}) [method: {method}]")
+                                mapped = True
+                                break
+                            else:
+                                print(f"  [WARN] Template item '{target_item}' not found in row map. Available items: {list(row_map.keys())}")
+                                # Try to find a similar item
+                                for available_item in row_map.keys():
+                                    if self.get_similarity(target_item.lower(), available_item.lower()) > 0.7:
+                                        row_idx = row_map[available_item]
+                                        is_cf_sheet[f"{col}{row_idx}"] = val_float
+                                        print(f"  [MAP-IS-SIMILAR] '{desc}' -> {section}::{available_item} ({val_float}) [method: {method}]")
+                                        mapped = True
+                                        break
+                                if mapped:
+                                    break
+                    
+                    if not mapped:
+                        # Add to "Other" for the most appropriate section
+                        section = self.assign_sections_by_context_is([{'description': desc, 'value': [val_float]}])[0]['section']
+                        if section and section in is_row_maps:
+                            row_map = is_row_maps[section]
+                            other_row = self.get_other_category_for_is_section(section)
+                            if other_row and other_row in row_map:
+                                row_idx = row_map[other_row]
+                                existing_val = is_cf_sheet[f"{col}{row_idx}"].value or 0
+                                if isinstance(existing_val, str): existing_val = 0
+                                is_cf_sheet[f"{col}{row_idx}"] = existing_val + val_float
+                                print(f"  [MAP-OTHER-IS] '{desc}' -> {section}::Other ({val_float})")
+
+        # --- Process Cash Flow Statement ---
+        if 'cash_flow' in extracted_data:
+            print("\n--- Processing Cash Flow Statement ---")
+            print(f"[DEBUG] Template year columns: {year_cols}")
+            print(f"[DEBUG] Extracted cash flow years: {list(extracted_data['cash_flow'].keys())}")
+            cf_data = extracted_data['cash_flow']
+            print(f"[DEBUG] CFS data structure: {type(cf_data)}")
+            print(f"[DEBUG] CFS data keys: {list(cf_data.keys()) if isinstance(cf_data, dict) else 'Not a dict'}")
+            
+            # Get CFS row maps
+            cf_row_maps = {
+                'operating_activities': self.get_cfs_row_map(['Net Income', 'Depreciation', 'Changes in Working Capital', 'Other Operating'], 'operating_activities'),
+                'investing_activities': self.get_cfs_row_map(['Capital Expenditures', 'Acquisitions', 'Investments', 'Other Investing'], 'investing_activities'),
+                'financing_activities': self.get_cfs_row_map(['Debt Issuance', 'Debt Repayment', 'Dividends', 'Other Financing'], 'financing_activities')
+            }
+            
+            # Process each year
+            for extracted_year in cf_data.keys():
+                if extracted_year not in year_mapping:
+                    print(f"[DEBUG] Skipping CFS year {extracted_year} - not in year mapping")
+                    continue
+                    
+                mapped_year = year_mapping[extracted_year]
+                if mapped_year not in year_cols:
+                    print(f"[DEBUG] Skipping CFS year {extracted_year} -> {mapped_year} - not in template")
+                    continue
+                    
+                col = year_cols[mapped_year]
+                year_data = cf_data[extracted_year]
+                print(f"[DEBUG] CFS year {extracted_year} -> {mapped_year} data: {type(year_data)}, length: {len(year_data) if isinstance(year_data, dict) else 'N/A'}")
+                
+                if not isinstance(year_data, dict):
+                    print(f"[WARN] CFS year {extracted_year} data is not a dict, skipping")
+                    continue
+                
+                print(f"\n[DEBUG] Processing CFS for year {extracted_year} -> {mapped_year}:")
+                for desc, val in year_data.items():
+                    print(f"[DEBUG] CFS item: '{desc}' -> {val} (type: {type(val)})")
+                    
+                    # Handle different value types
+                    if isinstance(val, list):
+                        numbers = val
+                    elif isinstance(val, (int, float, str)):
+                        numbers = [val]
+                    else:
+                        print(f"[WARN] Unknown CFS value type: {type(val)}, skipping")
+                        continue
+                    
+                    if not numbers:
+                        continue
+                    
+                    try:
+                        val_float = float(re.sub(r'[^\d\.-]', '', str(numbers[0])))
+                    except (ValueError, TypeError):
+                        print(f"[WARN] Could not convert CFS value to float: {numbers[0]}")
+                        continue
+                    
+                    # Skip totals
+                    if self.is_total_or_net_row(desc):
+                        print(f"  [SKIP TOTAL] '{desc}' is a total/subtotal row.")
+                        continue
+                    
+                    # Try to map to CFS sections
+                    mapped = False
+                    for section, row_map in cf_row_maps.items():
+                        if not row_map:
+                            continue
+                        
+                        template_items = list(row_map.keys())
+                        target_item, score, method = self.hybrid_map_item_decoupled(
+                            desc, template_items, section, 'cash_flow'
+                        )
+                        
+                        if target_item and score >= 0.4:
+                            if target_item in row_map:
+                                row_idx = row_map[target_item]
+                                is_cf_sheet[f"{col}{row_idx}"] = val_float
+                                print(f"  [MAP-CFS] '{desc}' -> {section}::{target_item} ({val_float}) [method: {method}]")
+                                mapped = True
+                                break
+                            else:
+                                print(f"  [WARN] Template item '{target_item}' not found in row map. Available items: {list(row_map.keys())}")
+                                # Try to find a similar item
+                                for available_item in row_map.keys():
+                                    if self.get_similarity(target_item.lower(), available_item.lower()) > 0.7:
+                                        row_idx = row_map[available_item]
+                                        is_cf_sheet[f"{col}{row_idx}"] = val_float
+                                        print(f"  [MAP-CFS-SIMILAR] '{desc}' -> {section}::{available_item} ({val_float}) [method: {method}]")
+                                        mapped = True
+                                        break
+                                if mapped:
+                                    break
+                    
+                    if not mapped:
+                        # Add to "Other" for the most appropriate section
+                        section = self.assign_sections_by_context_cfs([{'description': desc, 'value': [val_float]}])[0]['section']
+                        if section and section in cf_row_maps:
+                            row_map = cf_row_maps[section]
+                            other_row = self.get_other_category_for_cfs_section(section)
+                            if other_row and other_row in row_map:
+                                row_idx = row_map[other_row]
+                                existing_val = is_cf_sheet[f"{col}{row_idx}"].value or 0
+                                if isinstance(existing_val, str): existing_val = 0
+                                is_cf_sheet[f"{col}{row_idx}"] = existing_val + val_float
+                                print(f"  [MAP-OTHER-CFS] '{desc}' -> {section}::Other ({val_float})")
+
+        # Save the populated template
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        current_dir = Path(__file__).resolve().parent
+        project_root = current_dir.parent.parent
+        output_dir = project_root / "output_excel"
+        output_dir.mkdir(exist_ok=True)
+        
+        populated_template_path = output_dir / f"populated_template_{timestamp}.xlsx"
+        wb.save(populated_template_path)
+        
+        # Close the workbook before trying to delete the temp file
+        wb.close()
+        
+        # Try to delete the temporary file with error handling
+        try:
+            Path("temp_template.xlsx").unlink()
+        except (PermissionError, FileNotFoundError) as e:
+            print(f"Warning: Could not delete temporary file temp_template.xlsx: {e}")
+            # The file will be cleaned up later or can be deleted manually
+        
+        print(f"\nTemplate populated and saved to: {populated_template_path}")
+        return str(populated_template_path)
+
+    def get_bs_row_map(self, sheet, start_row, end_row):
+        """Helper to get row map for a BS section."""
+        row_map = {}
+        for row in range(start_row, end_row + 1):
+            cell_val = sheet.cell(row=row, column=1).value
+            if cell_val:
+                row_map[cell_val] = row
+        return row_map
+
+    def log_mapping_decision(self, desc, year, section, target_item, value, method, action, double_counted=False):
+        msg = f"[MAP-{action}] '{desc}' [{year}] -> {section}::{target_item} ({value}) [method: {method}]"
+        if double_counted:
+            msg += " [DOUBLE COUNTED WARNING]"
+        print(msg)
+        self.extraction_logger.info(msg)
+
+    def log_skip_decision(self, desc, year, section, reason):
+        msg = f"[SKIP] '{desc}' [{year}] in {section}: {reason}"
+        print(msg)
+        self.extraction_logger.info(msg)
+
+    def log_section_sum_check(self, section, year, mapped_sum, template_total, ok):
+        msg = f"[CHECK] Section '{section}' [{year}]: mapped sum = {mapped_sum}, template total = {template_total} -> {'OK' if ok else 'MISMATCH'}"
+        print(msg)
+        self.extraction_logger.info(msg)
 
 def main():
     # Get project root directory

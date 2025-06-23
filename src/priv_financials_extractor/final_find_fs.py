@@ -924,6 +924,113 @@ class FinancialStatementFinder:
                 }
         return statement_pages
     
+    def confirm_statement_pages(self, filename: str) -> dict:
+        """
+        Display detected financial statement pages and allow user confirmation/modification.
+        
+        Returns:
+            dict: Confirmed statement pages in the format expected by the pipeline
+                  e.g., {'balance_sheet': [5, 6], 'income_statement': [7], 'cash_flow': [8]}
+        """
+        print("\n" + "="*60)
+        print("FINANCIAL STATEMENT PAGE CONFIRMATION")
+        print("="*60)
+        print(f"File: {filename}")
+        
+        # Get the detected pages
+        detected_pages = self.get_statement_pages()
+        
+        # Display current detections for all statements first
+        print("\nDetected Financial Statement Pages:")
+        print("-" * 40)
+        
+        statement_names = {
+            'balance_sheet': 'Balance Sheet',
+            'income_statement': 'Income Statement', 
+            'cash_flow': 'Cash Flow Statement'
+        }
+        
+        # Show all detected pages first
+        all_detected = {}
+        for stmt_type in ['balance_sheet', 'income_statement', 'cash_flow']:
+            stmt_name = statement_names[stmt_type]
+            
+            if stmt_type in detected_pages and detected_pages[stmt_type]['pages']:
+                pages = detected_pages[stmt_type]['pages']
+                confidence = detected_pages[stmt_type]['confidence'] * 100
+                print(f"\n{stmt_name}:")
+                print(f"  Detected Pages: {pages}")
+                print(f"  Confidence: {confidence:.1f}%")
+                
+                # Show all pages with scores for this statement type
+                if stmt_type in self.final_scores:
+                    print("  All detected pages with scores:")
+                    sorted_pages = sorted(self.final_scores[stmt_type].items(), 
+                                        key=lambda x: (-x[1], x[0]))
+                    for page, score in sorted_pages[:5]:  # Show top 5
+                        conf_level = "High" if score >= 80 else "Medium" if score >= 60 else "Low"
+                        print(f"    Page {page}: {score:.1f}% ({conf_level})")
+                
+                all_detected[stmt_type] = pages
+            else:
+                print(f"\n{stmt_name}: Not detected")
+                all_detected[stmt_type] = []
+        
+        # Ask one y/n question for all statements
+        print("\n" + "="*60)
+        print("CONFIRMATION")
+        print("="*60)
+        
+        while True:
+            response = input("Confirm all detected pages above? (y/n): ").strip().lower()
+            
+            if response in ['y', 'yes']:
+                # Use all detected pages
+                confirmed_pages = {stmt_type: pages for stmt_type, pages in all_detected.items() if pages}
+                print("✓ Confirmed all detected pages")
+                break
+            elif response in ['n', 'no']:
+                # Ask for custom page numbers for each statement
+                print("\nEntering custom page numbers...")
+                confirmed_pages = {}
+                
+                for stmt_type in ['balance_sheet', 'income_statement', 'cash_flow']:
+                    stmt_name = statement_names[stmt_type]
+                    
+                    while True:
+                        custom_input = input(f"Enter page numbers for {stmt_name} (comma-separated, or press Enter to skip): ").strip()
+                        
+                        if not custom_input:  # Skip this statement
+                            print(f"✗ Skipping {stmt_name}")
+                            break
+                        
+                        try:
+                            custom_pages = [int(p.strip()) for p in custom_input.split(',') if p.strip()]
+                            if custom_pages:
+                                confirmed_pages[stmt_type] = sorted(custom_pages)
+                                print(f"✓ Custom {stmt_name}: {confirmed_pages[stmt_type]}")
+                                break
+                            else:
+                                print("No valid page numbers entered. Please try again or press Enter to skip.")
+                        except ValueError:
+                            print("Invalid input. Please enter comma-separated numbers (e.g., 5,6,7) or press Enter to skip.")
+                
+                break
+            else:
+                print("Please enter 'y' (yes) or 'n' (no)")
+        
+        print("\n" + "="*60)
+        print("CONFIRMATION SUMMARY:")
+        print("="*60)
+        for stmt_type, pages in confirmed_pages.items():
+            stmt_name = statement_names[stmt_type]
+            print(f"{stmt_name}: {pages}")
+        
+        if not confirmed_pages:
+            print("No pages confirmed. Extraction will proceed without page filtering.")
+        
+        return confirmed_pages
+
 def main():
     if len(sys.argv) != 2:
         print("Usage: python final_find_fs.py <pdf_path>")
@@ -958,10 +1065,17 @@ def main():
         print("\nHigh Confidence Statement Pages (>=50%):")
         for stmt_type, pages in statement_pages.items():
             print(f"  {stmt_type.replace('_', ' ').title()}: {pages}")
+        
+        # Use the confirmation system
+        confirmed_pages = finder.confirm_statement_pages(filename)
+        
+        # Return the confirmed pages in the format expected by the pipeline
+        return confirmed_pages
             
         print("\n" + "="*50 + "\n")
     else:
         print(f"No content extracted from {filename}")
+        return {}
         
 if __name__ == "__main__":
     main()

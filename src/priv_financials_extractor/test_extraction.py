@@ -34,24 +34,15 @@ def test_extraction():
     finder = FinancialStatementFinder()
     lines, toc_pages, statement_pages = finder.extractContent(str(pdf_path))
     
-    high_conf_pages = finder.get_statement_pages()
-    print("\nFinancial Statement Detection Results:")
-    for stmt_type, info in high_conf_pages.items():
-        if info['pages']:
-            conf_percent = info['confidence'] * 100
-            print(f"  {stmt_type.replace('_', ' ').title()}: Page {info['pages']} ({conf_percent:.1f}% confidence)")
-        else:
-            print(f"  {stmt_type.replace('_', ' ').title()}: Not Found")
+    # Use the confirmation system to get user-verified pages
+    confirmed_pages = finder.confirm_statement_pages(pdf_path.name)
+    
+    if not confirmed_pages:
+        print("ERROR: No financial statement pages confirmed!")
+        return
     
     # Convert to format expected by extractor
-    pages_to_extract = {}
-    for stmt_type, info in high_conf_pages.items():
-        if info['pages']:
-            pages_to_extract[stmt_type] = info['pages']
-    
-    if not pages_to_extract:
-        print("ERROR: No financial statements found!")
-        return
+    pages_to_extract = confirmed_pages
     
     # Step 2: Extract text
     print("\n" + "="*60)

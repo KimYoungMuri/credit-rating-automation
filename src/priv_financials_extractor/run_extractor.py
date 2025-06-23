@@ -542,28 +542,15 @@ def main():
         finder = FinancialStatementFinder()
         _, _, statement_pages = finder.extractContent(str(pdf_path))
         
-        # Get high confidence pages and print them
-        high_conf_pages = finder.get_statement_pages()
-        print_flush("\\nFinancial Statement Detection Results:")
-        print_flush("=" * 50)
-        for stmt_type, info in high_conf_pages.items():
-            if info['pages']:
-                conf_percent = info['confidence'] * 100
-                print_flush(f"\\n{stmt_type.replace('_', ' ').title()}:")
-                print_flush(f"  Page(s) {info['pages']}: {conf_percent:.1f}% confidence (High)")
-            else:
-                print_flush(f"\\n{stmt_type.replace('_', ' ').title()}: Not Found")
-        print_flush("=" * 50)
-
-        if not any(p.get('pages') for p in high_conf_pages.values()):
-            print_flush("ERROR: No financial statements found with sufficient confidence. Aborting.")
+        # Use the confirmation system to get user-verified pages
+        confirmed_pages = finder.confirm_statement_pages(pdf_filename)
+        
+        if not confirmed_pages:
+            print_flush("ERROR: No financial statement pages confirmed. Aborting.")
             return
             
         # Convert to the format expected by the extractor {stmt_type: [page_nums]}
-        pages_to_extract = {
-            stmt_type: info['pages']
-            for stmt_type, info in high_conf_pages.items() if info['pages']
-        }
+        pages_to_extract = confirmed_pages
         
         # --- Step 2: Extract text from the identified pages ---
         print_flush("\n--- Step 2: Extracting text from identified pages... ---")
@@ -576,7 +563,7 @@ def main():
             return
         
         print_flush("\n--- Step 3: Mapping extracted data to template... ---")
-        matcher = TemplateMatcher()
+        matcher = TemplateMatcher(use_llm_fallback=True)
         template_path = project_root / "templates" / "financial_template.xlsx"
         
         final_populated_path = matcher.map_to_template(extracted_data, str(template_path))

@@ -459,28 +459,28 @@ def main():
         print(f"PDF file path not found: {pdf_path}")
         return
     
-    # Step 1: Use final_find_fs.py to get statement pages
+    # Step 1: Use final_find_fs.py to get statement pages with confirmation
     print("Step 1: Finding financial statement pages...")
     finder = FinancialStatementFinder()
     lines, toc_pages, statement_pages = finder.extractContent(pdf_path)
     
     if statement_pages:
         print(f"Found statement pages: {statement_pages}")
-        # Get the high confidence pages (>=50%)
-        high_conf_pages = finder.get_statement_pages()
-        print(f"High confidence pages (>=50%): {high_conf_pages}")
+        
+        # Use the confirmation system to get user-verified pages
+        confirmed_pages = finder.confirm_statement_pages(pdf_filename)
         
         # Convert to the format expected by extract_text
         statement_pages_dict = {}
-        for stmt_type, pages in high_conf_pages.items():
+        for stmt_type, pages in confirmed_pages.items():
             if pages:  # Only add if we have pages
                 statement_pages_dict[stmt_type] = pages
     else:
         print("No statement pages found by final_find_fs.py")
         statement_pages_dict = None
     
-    # Step 2: Extract text using the found pages
-    print("\nStep 2: Extracting text from identified pages...")
+    # Step 2: Extract text using the confirmed pages
+    print("\nStep 2: Extracting text from confirmed pages...")
     extractor = TextExtractor()
     excel_path, extracted_data = extractor.extract_text(pdf_path, process_numbers=True, statement_pages=statement_pages_dict)
     
