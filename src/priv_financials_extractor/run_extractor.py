@@ -12,11 +12,11 @@ import shutil
 from openpyxl import load_workbook
 import torch
 from transformers import BertTokenizer, BertForSequenceClassification
-import openai
 from typing import List, Dict, Tuple, Optional
 import numpy as np
 from tenacity import retry, stop_after_attempt, wait_random_exponential
 from sentence_transformers import SentenceTransformer
+from collections import defaultdict
 
 class TeeOutput:
     def __init__(self, filename):
@@ -129,8 +129,6 @@ def populate_excel_template(extracted_data, template_path=None):
     """
     Populate Excel template with extracted financial data using subsection-aware, flagging, and 'Other(s)' logic.
     """
-    from collections import defaultdict
-    
     # Initialize embedding matcher (will use OpenAI if API key available)
     matcher = EmbeddingMatcher()
     
@@ -498,65 +496,105 @@ def export_to_template(results, output_dir):
     # Call populate_excel_template with the converted data
     return populate_excel_template(converted_data, str(template_path))
 
-def main():
-    # Get project root directory (two levels up from this file)
+def main(): 
+    """
+    Main workflow for the financial statement extraction and mapping process.
+    """
+    # Get project root directory
     current_dir = Path(__file__).resolve().parent
     project_root = current_dir.parent.parent
     
-    # Set up input and output directories relative to project root
+    # Setup input and output directories
     input_pdfs_dir = project_root / "input_pdfs"
-    output_dir = project_root / "output_excel"
+    output_excel_dir = project_root / "output_excel"
     input_pdfs_dir.mkdir(exist_ok=True)
-    output_dir.mkdir(exist_ok=True)
-
-    if len(sys.argv) > 1: 
-        pdf_filename = sys.argv[1]
-    else: 
-        pdf_filename = "US_Venture_2024.pdf"  # Default to US_Venture_2024.pdf
-
-    pdf_path = input_pdfs_dir / pdf_filename
-    pdf_path = str(pdf_path.resolve())
-
-    print(f"Base directory: {project_root}")
-    print(f"Looking for PDF file: {pdf_path}")
-
-    if not Path(pdf_path).exists():
-        print(f"PDF file path not found: {pdf_path}")
-        return
+    output_excel_dir.mkdir(exist_ok=True)
     
-    # First run the extractor
-    print("\nRunning text extractor...")
-    extractor = TextExtractor()
-    excel_path, extracted_data = extractor.extract_text(pdf_path, process_numbers=True)
+    # Redirect stdout to both terminal and log file
+    log_file_path = project_root / "run_extractor.log"
+    sys.stdout = TeeOutput(log_file_path)
     
-    if not excel_path or not extracted_data:
-        print("Failed to extract data from PDF")
-        return
+    print_flush("--- Starting Financial Statement Extraction Workflow ---")
+    
+    try:
+        # --- Get PDF file from command line or user input ---
+        if len(sys.argv) > 1:
+            pdf_filename = sys.argv[1]
+        else:
+            # Find the most recently modified PDF in the input directory
+            pdf_files = list(input_pdfs_dir.glob("*.pdf"))
+            if not pdf_files:
+                print_flush("No PDF files found in the 'input_pdfs' directory.")
+                return
+            latest_pdf = max(pdf_files, key=lambda p: p.stat().st_mtime)
+            pdf_filename = latest_pdf.name
+            print_flush(f"No PDF specified, processing most recent: {pdf_filename}")
+
+        pdf_path = input_pdfs_dir / pdf_filename
+        if not pdf_path.exists():
+            print_flush(f"ERROR: PDF file not found at {pdf_path}")
+            return
+            
+        print_flush(f"\nProcessing file: {pdf_path}")
         
-    # Now run template mapper
-    print("\nRunning template mapper...")
-    from final_template_mapper import TemplateMatcher
-    mapper = TemplateMatcher()
-    
-    print("Processing extracted data...")
-    results = mapper.process_excel(str(excel_path))
-    
-    if results:
-        print("\nMapping Results:")
-        print("=" * 50)
+        # --- Step 1: Find financial statement pages ---
+        print_flush("\n--- Step 1: Finding financial statement pages... ---")
+        finder = FinancialStatementFinder()
+        _, _, statement_pages = finder.extractContent(str(pdf_path))
         
-        for stmt_type, years in results.items():
-            print(f"\n{stmt_type.replace('_', ' ').title()}:")
-            for year in ['2024', '2023']:
-                print(f"\n{year}:")
-                for item, value in years[year].items():
-                    print(f"{item}: {value}")
-        
-        # Export to template
-        template_path = export_to_template(results, output_dir)
-        print(f"\nTemplate populated and saved to: {template_path}")
-    else:
-        print("Failed to map data to template")
+        # Get high confidence pages and print them
+        high_conf_pages = finder.get_statement_pages()
+        print_flush("\\nFinancial Statement Detection Results:")
+        print_flush("=" * 50)
+        for stmt_type, info in high_conf_pages.items():
+            if info['pages']:
+                conf_percent = info['confidence'] * 100
+                print_flush(f"\\n{stmt_type.replace('_', ' ').title()}:")
+                print_flush(f"  Page(s) {info['pages']}: {conf_percent:.1f}% confidence (High)")
+            else:
+                print_flush(f"\\n{stmt_type.replace('_', ' ').title()}: Not Found")
+        print_flush("=" * 50)
 
+        if not any(p.get('pages') for p in high_conf_pages.values()):
+            print_flush("ERROR: No financial statements found with sufficient confidence. Aborting.")
+            return
+            
+        # Convert to the format expected by the extractor {stmt_type: [page_nums]}
+        pages_to_extract = {
+            stmt_type: info['pages']
+            for stmt_type, info in high_conf_pages.items() if info['pages']
+        }
+        
+        # --- Step 2: Extract text from the identified pages ---
+        print_flush("\n--- Step 2: Extracting text from identified pages... ---")
+        extractor = TextExtractor()
+        # The `extract_text` method now returns a dictionary in the correct format
+        _, extracted_data = extractor.extract_text(str(pdf_path), process_numbers=True, statement_pages=pages_to_extract)
+
+        if not extracted_data:
+            print_flush("ERROR: Text extraction failed to produce data. Aborting.")
+            return
+        
+        print_flush("\n--- Step 3: Mapping extracted data to template... ---")
+        matcher = TemplateMatcher()
+        template_path = project_root / "templates" / "financial_template.xlsx"
+        
+        final_populated_path = matcher.map_to_template(extracted_data, str(template_path))
+        
+        print_flush(f"\n--- WORKFLOW COMPLETE ---")
+        print_flush(f"Final populated template saved to: {final_populated_path}")
+
+    except Exception as e:
+        print_flush(f"\n--- An error occurred during the workflow ---")
+        print_flush(f"Error: {str(e)}")
+        print_flush("Traceback:")
+        traceback.print_exc(file=sys.stdout)
+    
+    finally:
+        # Restore original stdout
+        if isinstance(sys.stdout, TeeOutput):
+            sys.stdout.logfile.close()
+            sys.stdout = sys.stdout.terminal
+            
 if __name__ == "__main__":
     main() 

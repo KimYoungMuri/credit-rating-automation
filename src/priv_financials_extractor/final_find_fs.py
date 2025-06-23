@@ -19,7 +19,9 @@ class ScoringSystem:
         statement_patterns = {
             'balance_sheet': [
                 (r'(?:consolidated\s+)?balance\s+sheets?', 10),
-                (r'statements?\s+of\s+financial\s+position', 8)
+                (r'statements?\s+of\s+financial\s+position', 8),
+                (r'statements?\s+of\s+financial\s+condition', 8),
+                (r'statement\s+of\s+condition', 8)
             ],
             'income_statement': [
                 (r'statements?\s+of\s+(?:comprehensive\s+)?income', 10),
@@ -55,7 +57,9 @@ class ScoringSystem:
         statement_patterns = {
             'balance_sheet': [
                 (r'(?:consolidated\s+)?balance\s+sheets?', 15),
-                (r'statements?\s+of\s+financial\s+position', 12)
+                (r'statements?\s+of\s+financial\s+position', 12),
+                (r'statements?\s+of\s+financial\s+condition', 12),
+                (r'statement\s+of\s+condition', 12)
             ],
             'income_statement': [
                 (r'statements?\s+of\s+(?:comprehensive\s+)?income', 15),
@@ -147,6 +151,8 @@ class FinancialStatementFinder:
                 r'(?:consolidated\s+)?balance\s+sheets?.*?(\\d+)(?:\\s*(?:and|to|through|\\-|&)\\s*(\\d+))?(?!\\d)',
                 r'balance\s+sheets?.*?(\d+)(?:[-–—]\s*(\d+))?',
                 r'statements?\s+of\s+financial\s+position.*?(\d+)(?:[-–—]\s*(\d+))?',
+                r'statements?\s+of\s+financial\s+condition.*?(\d+)(?:[-–—]\s*(\d+))?',
+                r'statement\s+of\s+condition.*?(\d+)(?:[-–—]\s*(\d+))?',
             ],
             'income_statement': [
                 r'statements?\s+of\s+(?:comprehensive\s+)?income.*?(\d+)(?:[-–—]\s*(\d+))?',
@@ -779,7 +785,16 @@ class FinancialStatementFinder:
         return False
 
     def is_statement_page(self, text, page_num):
-        """Check if this page appears to be a financial statement."""
+        text_lower = text.lower()
+        
+        # NEW: Check for negative keywords indicating it's NOT a statement page
+        negative_keywords = ["independent auditors' report", "auditors' responsibilities", "report of independent"]
+        if any(keyword in text_lower for keyword in negative_keywords):
+            return False, 0
+        # END NEW
+
+        # Check for statement keywords
+        scores = {}
         if not text:
             #self.logger.info(f"Page {page_num} - Rejected: Empty text")
             return False, 0
@@ -881,19 +896,32 @@ class FinancialStatementFinder:
     
     def get_statement_pages(self) -> dict:
         """
-        Returns a dictionary containing the page numbers for each type of financial statement.
-        Only includes pages with confidence score >= 50%.
+        Returns a dictionary containing the page numbers and highest confidence score 
+        for each type of financial statement. Only includes statements with a 
+        confidence score >= 50%.
         
         Returns:
-            dict: A dictionary with keys 'balance_sheet', 'income_statement', 'cash_flow'
-                 and values as lists of page numbers with confidence scores >= 50%.
+            dict: A dictionary where keys are statement types and values are another
+                  dictionary with 'pages' and 'confidence'.
+                  e.g., {'balance_sheet': {'pages': [5], 'confidence': 0.92}}
         """
         statement_pages = {}
         for stmt_type, pages in self.final_scores.items():
             # Get pages with confidence >= 50%
             high_conf_pages = {page: score for page, score in pages.items() if score >= 50}
             if high_conf_pages:
-                statement_pages[stmt_type] = sorted(high_conf_pages.keys())
+                # Find the page with the highest score for this statement type
+                best_page = max(high_conf_pages, key=high_conf_pages.get)
+                confidence = high_conf_pages[best_page] / 100.0 # Normalize to 0-1
+                
+                # For now, we assume statements can span multiple pages if they are contiguous
+                # and of the same type. This logic can be enhanced.
+                sorted_pages = sorted(high_conf_pages.keys())
+                
+                statement_pages[stmt_type] = {
+                    'pages': sorted_pages,
+                    'confidence': confidence
+                }
         return statement_pages
     
 def main():

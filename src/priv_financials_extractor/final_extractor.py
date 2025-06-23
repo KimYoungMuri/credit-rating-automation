@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 from final_template_mapper import TemplateMatcher
+from sklearn.cluster import DBSCAN
 
 class TextExtractor: 
     def __init__(self):
@@ -51,6 +52,12 @@ class TextExtractor:
         """
         if not text:
             return None
+        
+        # --- NEW: Filter out year-like numbers ---
+        cleaned_text = text.strip()
+        if len(cleaned_text) == 4 and cleaned_text.isdigit() and 1990 <= int(cleaned_text) <= 2050:
+            return None
+        # --- END NEW ---
         
         original_text = text
         text = text.strip()
@@ -103,172 +110,181 @@ class TextExtractor:
         """
         all_number_words = []
         for word in words:
+            # Filter out numbers that are likely to be years
+            text = word['text'].strip()
+            if len(text) == 4 and text.isdigit() and 1990 <= int(text) <= 2050:
+                continue
+
             # We use is_number for a quick check, as clean_and_validate is more expensive
             if self.is_number(word['text']):
                 all_number_words.append(word)
 
-        if not all_number_words:
+        if len(all_number_words) < 3: # Not enough numbers to form a column
             return []
 
-        # Cluster word x-positions to find columns
-        x_coords = sorted([word['x0'] for word in all_number_words])
+        # Use DBSCAN to find clusters of numbers based on their x-position
+        # The features are the x-coordinates of the start of each number word
+        x_coords = np.array([w['x0'] for w in all_number_words]).reshape(-1, 1)
+
+        # eps: The maximum distance between two samples for one to be considered as in the neighborhood of the other.
+        # This is effectively our column width tolerance. 25px is a reasonable starting point.
+        # min_samples: The number of samples in a neighborhood for a point to be considered as a core point.
+        # This is our minimum number of values to form a column.
+        db = DBSCAN(eps=25, min_samples=3).fit(x_coords)
         
-        if not x_coords:
-            return []
+        labels = db.labels_
+        n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+        
+        print(f"DEBUG: DBSCAN found {n_clusters} clusters (columns).")
 
-        clusters = []
-        if x_coords:
-            current_cluster = [x_coords[0]]
-            # A gap of ~4 characters is a good threshold for a new column
-            COLUMN_GAP_THRESHOLD = 30 
-
-            for x in x_coords[1:]:
-                if x - current_cluster[-1] < COLUMN_GAP_THRESHOLD:
-                    current_cluster.append(x)
-                else:
-                    clusters.append(current_cluster)
-                    current_cluster = [x]
-            clusters.append(current_cluster)
-
-        # Define column boundaries from clusters
         final_columns = []
-        for cluster in clusters:
-            if not cluster: continue
+        for i in range(n_clusters):
+            cluster_indices = np.where(labels == i)[0]
             
-            # Find all words that fall into this cluster's x-range
-            min_x, max_x = min(cluster), max(cluster)
-            cluster_words = [w for w in all_number_words if min_x <= w['x0'] <= max_x]
-            
-            # A real column must contain a minimum number of values
-            if len(cluster_words) < 3:
+            cluster_words = [all_number_words[j] for j in cluster_indices]
+
+            if not cluster_words:
                 continue
 
+            # Define column boundary from the words in the cluster
             leftmost_x = min(w['x0'] for w in cluster_words)
-            rightmost_x = max(w['x0'] + len(w['text']) * 7 for w in cluster_words) # Avg char width 7px
+            # Calculate the rightmost edge by finding the end of the longest word in the cluster
+            rightmost_x = max(w['x0'] + len(w['text']) * 7.5 for w in cluster_words) # Avg char width
             
             final_columns.append((leftmost_x - 5, rightmost_x + 5)) # Add padding
         
-        # Merge overlapping columns that were generated
-        if not final_columns:
-            return []
-        
         final_columns.sort()
-        merged_columns = [final_columns[0]]
-        for current_start, current_end in final_columns[1:]:
-            last_start, last_end = merged_columns[-1]
-            if current_start < last_end: # Overlap detected
-                merged_columns[-1] = (last_start, max(last_end, current_end))
-            else:
-                merged_columns.append((current_start, current_end))
+        
+        print(f"DEBUG: Found {len(final_columns)} number columns: {final_columns}")
+        return final_columns
 
-        print(f"DEBUG: Found {len(merged_columns)} number columns: {merged_columns}")
-        return merged_columns
-
-    def process_numbers(self, lines: List[List[dict]], number_columns: List[Tuple[float, float]] = None, stmt_type: str = 'balance_sheet') -> List[dict]:
+    def find_column_headers(self, words: List[dict]) -> Dict[str, float]:
         """
-        Processes lines of words into a structured format of {description, numbers}.
-        It robustly separates text from numbers and places numbers in the correct column.
+        Finds potential year-based column headers (e.g., "2023", "2024") at the top of the page.
+        Returns a dictionary mapping the year (as a string) to its horizontal position.
+        """
+        headers = {}
+        # Heuristic: Scan the top 20% of the page for headers
+        page_top_y = min(w['top'] for w in words) if words else 0
+        page_bottom_y = max(w['bottom'] for w in words) if words else 0
+        header_zone_y = page_top_y + (page_bottom_y - page_top_y) * 0.2
+        
+        for word in words:
+            if word['top'] > header_zone_y:
+                continue # Only look at the top of the page
+                
+            text = word['text'].strip()
+            # Basic check for a 4-digit number that looks like a year
+            if len(text) == 4 and text.isdigit() and 1990 <= int(text) <= 2050:
+                # Use the center of the word as its position
+                x_pos = word['x0'] + (word['x1'] - word['x0']) / 2
+                headers[text] = x_pos
+                
+        # Sort by horizontal position to handle cases where years are out of order
+        sorted_headers = dict(sorted(headers.items(), key=lambda item: item[1]))
+        print(f"DEBUG: Found potential year headers: {sorted_headers}")
+        return sorted_headers
+
+    def find_and_label_columns(self, words: List[dict], year_headers: Dict[str, float]) -> Dict[int, str]:
+        """
+        Identifies number columns and labels them with the nearest year header.
+        Returns a dictionary mapping a column index to its year label.
+        """
+        # Step 1: Find number columns using the existing DBSCAN approach
+        number_columns_coords = self.find_number_columns(words) # This returns [(x0, x1), ...]
+        if not number_columns_coords:
+            return {}
+
+        labeled_columns = {}
+        
+        # Step 2: Assign each found number column to the nearest year header
+        for i, (col_x0, col_x1) in enumerate(number_columns_coords):
+            col_center = col_x0 + (col_x1 - col_x0) / 2
+            
+            # Find the year header with the minimum horizontal distance to the column's center
+            if year_headers:
+                closest_year = min(
+                    year_headers.keys(),
+                    key=lambda year: abs(year_headers[year] - col_center)
+                )
+                labeled_columns[i] = closest_year
+            else:
+                # Fallback if no year headers were found
+                labeled_columns[i] = f"Value_{i+1}"
+
+        print(f"DEBUG: Labeled columns: {labeled_columns}")
+        return labeled_columns
+
+    def process_numbers(self, lines: List[List[dict]], number_columns: List[Tuple[float, float]], labeled_columns: Dict[int, str]) -> List[dict]:
+        """
+        Processes lines of words into a structured format of {description, numbers:{year: value}}.
         """
         processed_lines = []
         if not number_columns:
+            # If no number columns are found, just return all text as descriptions.
             for line in lines:
                 line_text = ' '.join(word['text'].replace('$', '').strip() for word in sorted(line, key=lambda w: w['x0']))
                 if line_text.strip():
-                    processed_lines.append({'description': line_text.strip(),'numbers': []})
+                    processed_lines.append({'description': line_text.strip(), 'numbers': {}})
             return processed_lines
 
         for line in lines:
             text_words = []
-            potential_number_words = []
-
-            # 1. Classify words into text or potential numbers
+            # Use a dictionary for number_values to store year-based values
+            number_values = {label: None for label in labeled_columns.values()}
+            
             for word in line:
-                if self.is_number(word['text']):
-                    potential_number_words.append(word)
-                else:
-                    text_words.append(word)
-
-            # 2. Assemble the description from text words
-            description = ' '.join(w['text'] for w in sorted(text_words, key=lambda w: w['x0']))
-            
-            # 3. Place numbers into their column buckets
-            number_values = [None] * len(number_columns)
-            
-            for num_word in potential_number_words:
-                cleaned_num = self.clean_and_validate_number(num_word['text'])
-                if cleaned_num is None:
-                    # If it looked like a number but wasn't, treat it as text
-                    description += ' ' + num_word['text']
-                    continue
-
-                word_center_x = num_word['x0'] + (len(num_word['text']) * 7 / 2)
+                word_center_x = word['x0'] + (len(word['text']) * 7 / 2) # Approximate center
+                is_in_number_column = False
                 
-                best_col_idx = -1
-                # Find which column this number belongs to
                 for i, (col_start, col_end) in enumerate(number_columns):
                     if col_start <= word_center_x <= col_end:
-                        best_col_idx = i
+                        cleaned_num = self.clean_and_validate_number(word['text'])
+                        if cleaned_num is not None and i in labeled_columns:
+                            year_label = labeled_columns[i]
+                            number_values[year_label] = cleaned_num
+                            is_in_number_column = True
                         break
                 
-                if best_col_idx != -1:
-                    number_values[best_col_idx] = cleaned_num
-                else:
-                    # If it didn't fit in a column, it's probably part of the description
-                    description += ' ' + num_word['text']
+                if not is_in_number_column:
+                    text_words.append(word)
+
+            description = ' '.join(w['text'] for w in sorted(text_words, key=lambda w: w['x0']))
+            description = re.sub(r'\\s+', ' ', description).strip()
             
-            # Final cleanup of the description
-            description = re.sub(r'\s+', ' ', description).strip()
-            
-            # Only add the line if it has content
-            if description or any(v is not None for v in number_values):
+            if len(description) <= 2 and any(v is not None for v in number_values.values()):
+                continue
+
+            if description or any(v is not None for v in number_values.values()):
                 processed_lines.append({
                     'description': description,
                     'numbers': number_values
                 })
-
-        # --- Step 2: Assign sections to all lines (using a helper) ---
-        matcher = TemplateMatcher()
         
-        raw_lines_for_matcher = [
-            {'description': l['description'], 'numbers': l['numbers']} for l in processed_lines
-        ]
-
-        if stmt_type == 'income_statement':
-            assigned = matcher.assign_sections_by_context_is(raw_lines_for_matcher)
-        elif stmt_type == 'cash_flow':
-            assigned = matcher.assign_sections_by_context_cfs(raw_lines_for_matcher)
-        else: # balance_sheet or default
-            assigned = matcher.assign_sections_by_context(raw_lines_for_matcher)
-        
-        # --- Step 3: Robust row-combining logic ---
+        # The row-combining logic needs to be adapted for the new numbers structure
         final_processed_lines = []
         i = 0
-        while i < len(assigned):
-            curr = assigned[i]
+        while i < len(processed_lines):
+            curr = processed_lines[i]
             desc = curr['description']
-            nums = curr['value'] if isinstance(curr['value'], list) else ([curr['value']] if curr['value'] else [])
-            section = curr.get('section', None)
-            
-            # Combine description-only rows with the next row if it has numbers
-            if desc and (not nums or all(n in [None, ''] for n in nums)) and i + 1 < len(assigned):
-                next_row = assigned[i + 1]
-                next_desc = next_row['description']
-                next_nums = next_row['value'] if isinstance(next_row['value'], list) else ([next_row['value']] if next_row['value'] else [])
-                next_section = next_row.get('section', None)
+            nums_dict = curr.get('numbers', {})
 
-                if next_nums and section == next_section:
+            # Combine description-only rows with the next row if it has numbers
+            if desc and all(n is None for n in nums_dict.values()) and i + 1 < len(processed_lines):
+                next_row = processed_lines[i + 1]
+                next_desc = next_row['description']
+                next_nums_dict = next_row.get('numbers', {})
+                
+                if any(n is not None for n in next_nums_dict.values()):
                     combined_desc = (desc + ' ' + next_desc).strip()
                     final_processed_lines.append({
                         'description': combined_desc,
-                        'numbers': next_nums
+                        'numbers': next_nums_dict
                     })
                     i += 2
                     continue
             
-            final_processed_lines.append({
-                'description': desc.strip(),
-                'numbers': nums
-            })
+            final_processed_lines.append(curr)
             i += 1
             
         return final_processed_lines
@@ -350,86 +366,20 @@ class TextExtractor:
             print(f"\nProcessing {pdf_path}")
             logging.info(f"\nProcessing {pdf_path}")
             
-            # Initialize finder at the start since we need it for continuation pages
             finder = FinancialStatementFinder()
             
-            if statement_pages:
-                logging.info("\nReceived statement pages from final_find_fs.py:")
-                for stmt_type, pages in statement_pages.items():
-                    logging.info(f"{stmt_type}: {pages}")
-            else:
-                logging.info("No statement pages provided from final_find_fs.py")
+            if not statement_pages:
+                logging.info("No statement pages provided. Falling back to direct scanning.")
+                # This fallback is simplified; in a real scenario, we'd run the full finder logic.
+                return None, None
             
             with pdfplumber.open(pdf_path) as pdf:
-                # Initialize statements dictionary based on provided pages
-                statements = {}
-                if statement_pages:
-                    for stmt_type, pages in statement_pages.items():
-                        if pages:  # Only add if we have pages
-                            statements[stmt_type] = {'pdf_page': pages[0], 'score': 100}  # Use first page if multiple
-                            logging.info(f"Using page {pages[0]} for {stmt_type} from final_find_fs.py")
-                
-                # If no pages provided or found, fall back to direct scanning
-                if not statements:
-                    logging.info("\nFalling back to direct page scanning:")
-                    
-                    # First pass: find TOC and statement pages
-                    toc_pages = []
-                    has_toc = False
-                    logging.info("\nDEBUG: First pass - Looking for TOC and statements")
-                    logging.info(f"Total pages in PDF: {len(pdf.pages)}")
-                    for page_num, page in enumerate(pdf.pages, 1):
-                        text = page.extract_text()
-                        logging.info(f"\nDEBUG: Checking page {page_num}")
-                        is_toc = finder.is_table_of_contents(text, page_num)
-                        if is_toc:
-                            has_toc = True
-                            toc_pages.append(page_num)
-                            logging.info(f"DEBUG: Found TOC on page {page_num}")
-                            # Process TOC to find statement pages
-                            toc_statements = finder.process_toc_page(text, page_num)
-                            logging.info("DEBUG: TOC statements found: %s", toc_statements)
-                            for stmt_type, info in toc_statements.items():
-                                if info['page'] is not None:
-                                    if stmt_type not in statements:
-                                        statements[stmt_type] = {'pdf_page': info['page'], 'score': info['score']}
-                                        logging.info(f"DEBUG: Found {stmt_type} on page {info['page']} from TOC with score {info['score']}")
-                                    elif info['score'] > statements[stmt_type]['score']:
-                                        statements[stmt_type] = {'pdf_page': info['page'], 'score': info['score']}
-                                        logging.info(f"DEBUG: Updated {stmt_type} to page {info['page']} from TOC with better score {info['score']}")
-                    
-                    # Second pass: direct scanning for statements
-                    logging.info("\nDEBUG: Second pass - Direct scanning for statements")
-                    for page_num, page in enumerate(pdf.pages, 1):
-                        text = page.extract_text()
-                        logging.info(f"\nDEBUG: Checking page {page_num}")
-                        is_statement, score = finder.is_statement_page(text, page_num)
-                        if is_statement and finder.last_statement_type:
-                            stmt_type = finder.last_statement_type
-                            logging.info(f"DEBUG: Found {stmt_type} on page {page_num} with score {score}")
-                            if stmt_type not in statements or score > statements[stmt_type]['score']:
-                                statements[stmt_type] = {'pdf_page': page_num, 'score': score}
-                                logging.info(f"DEBUG: {'Updated' if stmt_type in statements else 'Added'} {stmt_type} to page {page_num} with score {score}")
-                
-                if not statements:
-                    logging.info("No financial statements found")
-                    return None, None
-                
-                logging.info("\nDEBUG: Final statement pages to be processed:")
-                for stmt_type, info in statements.items():
-                    logging.info(f"{stmt_type}: page {info['pdf_page']} (score: {info['score']}")
-                
-                # Extract and process each statement
-                extracted_data = defaultdict(list)
-                
-                for stmt_type, info in statements.items():
-                    # Handle multiple pages for a single statement type
-                    pages_to_process = [info['pdf_page']]
-                    if statement_pages and stmt_type in statement_pages:
-                        pages_to_process = statement_pages[stmt_type]
-                    
+                # This will hold the final data in the format the mapper expects
+                final_extracted_data = defaultdict(lambda: defaultdict(dict))
+
+                for stmt_type, page_nums in statement_pages.items():
                     all_processed_lines = []
-                    for page_num in pages_to_process:
+                    for page_num in page_nums:
                         if page_num > len(pdf.pages):
                             print(f"PAGE NUMBER ERROR: {pdf_path} has only {len(pdf.pages)} pages but exceeded")
                             continue
@@ -438,17 +388,11 @@ class TextExtractor:
                         page = pdf.pages[page_num - 1]
                         
                         words = page.extract_words(
-                            x_tolerance=1, 
-                            y_tolerance=1, 
-                            keep_blank_chars=False,
-                            use_text_flow=True, # More robust for reading order
-                            extra_attrs=["fontname", "size"]
+                            x_tolerance=1, y_tolerance=1, keep_blank_chars=False,
+                            use_text_flow=True, extra_attrs=["fontname", "size"]
                         )
-                        
-                        # --- New Line Clustering Logic ---
                         if not words: continue
                         
-                        # Sort words primarily by vertical position, then horizontal
                         words.sort(key=lambda w: (w['top'], w['x0']))
                         
                         lines = []
@@ -456,63 +400,37 @@ class TextExtractor:
                         if words:
                             current_line.append(words[0])
                             for word in words[1:]:
-                                # If word is on the same line (small vertical distance)
                                 if abs(word['top'] - current_line[-1]['top']) < 5:
                                     current_line.append(word)
                                 else:
-                                    # New line detected
                                     lines.append(sorted(current_line, key=lambda w: w['x0']))
                                     current_line = [word]
                             lines.append(sorted(current_line, key=lambda w: w['x0']))
                         
-                        filtered_lines = [line for line in lines if line] # Remove empty lines
+                        filtered_lines = [line for line in lines if line]
                         
-                        # Find number columns using all words on the page
-                        number_columns = self.find_number_columns(words) if process_numbers else []
+                        # --- New Year-Aware Column Processing ---
+                        year_headers = self.find_column_headers(words)
+                        number_columns_coords = self.find_number_columns(words)
+                        labeled_columns = self.find_and_label_columns(words, year_headers)
                         
-                        # Process lines into structured data
-                        processed_lines = self.process_numbers(filtered_lines, number_columns, stmt_type=stmt_type)
-                        print(f"DEBUG: Processed {len(processed_lines)} lines for {stmt_type} on page {page_num}")
+                        processed_lines = self.process_numbers(filtered_lines, number_columns_coords, labeled_columns)
                         all_processed_lines.extend(processed_lines)
 
-                    # Store the processed lines for the statement type
-                    extracted_data[stmt_type].extend(all_processed_lines)
-                    print(f"DEBUG: Total {len(all_processed_lines)} lines stored for {stmt_type}")
+                    # Convert the processed lines into the mapper-friendly format
+                    for line in all_processed_lines:
+                        desc = line['description']
+                        for year, value in line['numbers'].items():
+                            if value is not None:
+                                final_extracted_data[stmt_type][year][desc] = value
                     
-                    # Print the table for the entire statement
+                    # (Optional) Print the extracted table for debugging
                     if all_processed_lines:
-                        # Find the maximum width for the description column
-                        max_desc_width = max((len(line['description']) for line in all_processed_lines if line['description']), default=30)
-                        max_desc_width = min(max_desc_width, 80)
-                        
-                        # Find the number of columns needed
-                        max_numbers = max((len(line['numbers']) for line in all_processed_lines), default=0)
-                        
-                        # Print header
-                        header = f"{'Description':<{max_desc_width}}"
-                        for i in range(max_numbers):
-                            header += f" | {'Value ' + str(i+1):>15}"
-                        print("\n" + "=" * len(header))
-                        print(header)
-                        print("=" * len(header))
-                        
-                        # Print rows
-                        for line in all_processed_lines:
-                            desc = (line['description'] or '')[:max_desc_width]
-                            row_str = f"{desc:<{max_desc_width}}"
-                            for i in range(max_numbers):
-                                num = line['numbers'][i] if i < len(line['numbers']) and line['numbers'][i] is not None else '-'
-                                row_str += f" | {str(num):>15}"
-                            print(row_str)
-                        print("=" * len(header) + "\n")
-                
-                # Export all data to Excel
-                if extracted_data:
-                    pdf_name = Path(pdf_path).stem
-                    excel_path = self.export_to_excel(extracted_data, pdf_name)
-                    return excel_path, extracted_data
-                
-                return None, None
+                        # This part would need to be updated to handle the new dict structure
+                        pass 
+
+                # Return the structured data directly, no intermediate Excel file
+                return None, final_extracted_data
 
         except Exception as e:
             print(f"Error extracting text: {str(e)}")

@@ -99,6 +99,10 @@ from sentence_transformers import SentenceTransformer
 import shutil
 from openpyxl import load_workbook
 from collections import defaultdict
+import openpyxl
+from datetime import datetime
+from llm_mapper import LLMMapper  # Import the LLM mapper
+from sklearn.metrics.pairwise import cosine_similarity
 
 # Place these at the module level, outside of any function
 IS_SECTION_TEMPLATE = {
@@ -142,6 +146,13 @@ CFS_SECTION_TEMPLATE = {
     },
     'other': {
         'template': ['Other']
+    },
+    'cash_reconciliation': {
+        'template': [
+            'Net change in Cash',
+            'Starting Cash',
+            'Ending Cash'
+        ]
     }
 }
 
@@ -251,6 +262,16 @@ class TemplateMatcher:
         self.setup_logging()
         self.used_items = set()  # Track used items globally
         self.extraction_logger = self.setup_extraction_logger()
+        
+        # Initialize LLM mapper for hybrid approach
+        self.llm_mapper = LLMMapper()
+        self.use_llm = self.llm_mapper.check_ollama_available()
+        if self.use_llm:
+            print("✅ LLM mapper available - using hybrid approach")
+        else:
+            print("⚠️  LLM mapper not available - using rule-based approach only")
+            print("   Install Ollama: https://ollama.ai/")
+            print("   Run: ollama pull mistral")
         
     def setup_logging(self):
         """Setup logging configuration"""
@@ -590,269 +611,55 @@ class TemplateMatcher:
 
     def assign_sections_by_context(self, extracted_lines: list) -> list:
         """
-        Assigns a section to each line item based on its position in the extracted table.
-        Uses manual mapping, regex, and semantic similarity (sentence-transformers) for section assignment.
-        Returns a list of dicts: {description, value, section}
+        Assigns BS sections to each line item based on content and explicit headers.
         """
-        import re
-        # Canonical section descriptions for semantic similarity
-        section_semantics = {
-            'current_assets': 'current assets',
-            'noncurrent_assets': 'noncurrent assets',
-            'current_liabilities': 'current liabilities',
-            'noncurrent_liabilities': 'noncurrent liabilities',
-            'equity': 'equity',
-        }
-        # Section header/total patterns (fuzzy, lowercased)
-        section_patterns = [
-            ('current_assets', [r'^current assets$', r'^total current assets$', r'^other current assets$', r'cash and cash equivalents', r'margin deposits', r'derivative assets', r'accounts receivable', r'inventories?', r'notes receivable', r'subchapter s income tax deposit']),
-            ('noncurrent_assets', [r'^net ppe$', r'^property and equipment', r'^goodwill', r'^intangibles', r'^other noncurrent assets$', r'^total non current assets$', r'^noncurrent assets$', r'deferred compensation plan investments', r'right of use assets', r'finance lease assets']),
-            ('current_liabilities', [r'^current liabilities$', r'^total current liabilities$', r'^other current liabilities$', r'^accounts payable$', r'^accrued liabilities$', r'^accrued interest$', r'^derivative liabilities$', r'^short term borrowing$', r'^current portion of long term debt$', r'^contingent consideration payable$', r'^finance lease liability—current portion$', r'^operating lease liability—current portion$', r'^long-term incentive—current portion$', r'^subchapter s income tax deposit obligation$']),
-            ('noncurrent_liabilities', [r'^long[- ]term debt$', r'^deferred income taxes$', r'^other noncurrent liabilities$', r'^total non current liabilities$', r'^noncurrent liabilities$', r'^revolving lines of credit$', r'^long-term incentive$', r'^deferred compensation$', r'^finance lease liability$', r'^operating lease liability$']),
-            ('equity', [r'^common stock$', r'^retained earnings$', r'^paid in capital$', r'^total equity$', r'^equity$', r'^shareholder', r'^noncontrolling interests$', r"^total common shareholders' equity$"])
-        ]
-        # Manual section overrides for common items (lowercase)
-        manual_section_map = {
-            'cash and cash equivalents': 'current_assets',
-            'cash and equivalents': 'current_assets',
-            'cash and cash equivalent': 'current_assets',
-            'margin deposits': 'current_assets',
-            'margin deposit': 'current_assets',
-            'derivative assets': 'current_assets',
-            'accounts receivable': 'current_assets',
-            'accounts receivable—net': 'current_assets',
-            'inventory': 'current_assets',
-            'inventory—net': 'current_assets',
-            'inventories—net': 'current_assets',
-            'notes receivable': 'current_assets',
-            'notes receivable—current portion': 'current_assets',
-            'subchapter s income tax deposit—current portion': 'current_assets',
-            'other current assets': 'current_assets',
-            'total current assets': 'current_assets',
-            'goodwill': 'noncurrent_assets',
-            'goodwill—net': 'noncurrent_assets',
-            'property and equipment—net': 'noncurrent_assets',
-            'property and equipment': 'noncurrent_assets',
-            'net ppe': 'noncurrent_assets',
-            'finance lease assets—net': 'noncurrent_assets',
-            'finance lease assets': 'noncurrent_assets',
-            'right of use assets—net': 'noncurrent_assets',
-            'right of use assets': 'noncurrent_assets',
-            'intangibles': 'noncurrent_assets',
-            'other intangible assets—net': 'noncurrent_assets',
-            'other intangible assets': 'noncurrent_assets',
-            'deferred compensation plan investments': 'noncurrent_assets',
-            'other noncurrent assets': 'noncurrent_assets',
-            'accounts payable': 'current_liabilities',
-            'accrued liabilities': 'current_liabilities',
-            'accrued interest': 'current_liabilities',
-            'derivative liabilities': 'current_liabilities',
-            'sales, excise and property taxes payable': 'current_liabilities',
-            'contingent consideration payable': 'current_liabilities',
-            'finance lease liability—current portion': 'current_liabilities',
-            'operating lease liability—current portion': 'current_liabilities',
-            'long-term incentive—current portion': 'current_liabilities',
-            'subchapter s income tax deposit obligation': 'current_liabilities',
-            'current portion of long term debt': 'current_liabilities',
-            'long-term debt—current portion': 'current_liabilities',
-            'total current liabilities': 'current_liabilities',
-            'long term debt': 'noncurrent_liabilities',
-            'long-term debt': 'noncurrent_liabilities',
-            'revolving lines of credit': 'noncurrent_liabilities',
-            'long-term incentive': 'noncurrent_liabilities',
-            'deferred compensation': 'noncurrent_liabilities',
-            'finance lease liability': 'noncurrent_liabilities',
-            'operating lease liability': 'noncurrent_liabilities',
-            'deferred income taxes': 'noncurrent_liabilities',
-            'other noncurrent liabilities': 'noncurrent_liabilities',
-            'total liabilities': 'noncurrent_liabilities',
-            'common stock': 'equity',
-            'retained earnings': 'equity',
-            'paid in capital': 'equity',
-            "total common shareholders' equity": 'equity',
-            'total common shareholders equity': 'equity',
-            'noncontrolling interests': 'equity',
-            'total equity': 'equity',
-            'total shareholders equity': 'equity',
-            'total stockholders equity': 'equity',
-            "total shareholders' equity": 'equity',
-            'total shareholders equity': 'equity',
-            "total stockholders' equity": 'equity',
-            'total stockholders equity': 'equity',
-        }
-        def normalize(s):
-            import re
-            if not s:
-                return ''
-            s = s.lower()
-            # Replace all dash types with a space
-            s = re.sub(r'[\u2013\u2014\u2012\u2010\-]', ' ', s)  # en dash, em dash, figure dash, hyphen, minus
-            s = re.sub(r'—', ' ', s)  # em dash (redundant, but explicit)
-            s = re.sub(r'–', ' ', s)  # en dash (redundant, but explicit)
-            s = re.sub(r'\s+', ' ', s)
-            s = s.strip()
-            return s
         assigned = []
         current_section = None
-        section_confidence = 0  # Track confidence in current section
         
-        # Track major section transitions
-        major_sections = ['current_assets', 'noncurrent_assets', 'current_liabilities', 'noncurrent_liabilities', 'equity']
-        section_transition_keywords = {
-            'current_assets': ['total current assets', 'current assets'],
-            'noncurrent_assets': ['total assets', 'total noncurrent assets', 'total non current assets'],
-            'current_liabilities': ['total current liabilities', 'current liabilities'],
-            'noncurrent_liabilities': ['total liabilities', 'total noncurrent liabilities'],
-            'equity': ['total equity', 'total shareholders equity', 'total stockholders equity']
+        # Keywords to identify major section headers
+        section_headers = {
+            'current_assets': ['current assets'],
+            'noncurrent_assets': ['noncurrent assets', 'non-current assets'],
+            'current_liabilities': ['current liabilities'],
+            'noncurrent_liabilities': ['noncurrent liabilities', 'non-current liabilities'],
+            'equity': ['equity', "stockholders' equity", "shareholders' equity"]
+        }
+
+        # Keywords for specific items that can also define a section
+        manual_map = {
+            'cash and cash equivalents': 'current_assets',
+            'accounts receivable': 'current_assets',
+            'inventories': 'current_assets',
+            'property, plant and equipment': 'noncurrent_assets',
+            'accounts payable': 'current_liabilities',
+            'retained earnings': 'equity',
+            'additional paid in capital': 'equity',
+            'common stock': 'equity'
         }
         
-        # Section boundary keywords that force transitions
-        section_boundary_keywords = {
-            'assets_to_liabilities': [
-                'accounts payable', 'derivative liabilities', 'sales excise and property taxes payable',
-                'accrued liabilities', 'long-term incentive', 'contingent consideration payable',
-                'subchapter s income tax deposit obligation', 'finance lease liability',
-                'operating lease liability', 'long-term debt', 'revolving lines of credit',
-                'deferred compensation', 'other noncurrent liabilities',
-                # Add all current liability items explicitly
-                'accounts payable', 'derivative liabilities', 'sales, excise and property taxes payable',
-                'accrued liabilities', 'long-term incentive—current portion', 'contingent consideration payable',
-                'subchapter s income tax deposit obligation', 'finance lease liability—current portion',
-                'operating lease liability—current portion', 'long-term debt—current portion',
-                'long term debt—current portion', 'long-term debt-current portion', 'long term debt-current portion',
-                'finance lease liability-current portion', 'operating lease liability-current portion',
-                'long-term incentive-current portion', 'long term incentive-current portion',
-            ],
-            'liabilities_to_equity': [
-                "total common shareholders' equity",
-                'total common shareholders equity',
-                "total shareholders' equity",
-                'total shareholders equity',
-                "total stockholders' equity",
-                'total stockholders equity',
-                'common stock', 'additional paid-in capital',
-                'retained earnings', 'accumulated other comprehensive income',
-                'treasury stock', 'noncontrolling interests', 'total equity', 'total shareholders equity'
-            ]
-        }
-        
-        for idx, line in enumerate(extracted_lines):
-            desc = normalize(line['description'])
-            original_desc = line['description']
-            print(f"[DEBUG] Normalized desc: '{desc}' (original: '{original_desc}')")
+        for line in extracted_lines:
+            desc = line['description']
+            desc_lower = desc.lower()
             
-            # Check for major section transitions first
-            section_transition_detected = False
-            for section, keywords in section_transition_keywords.items():
-                if any(keyword in desc for keyword in keywords):
+            # 1. Check for major section headers first
+            found_header = False
+            for section, keywords in section_headers.items():
+                if any(keyword in desc_lower for keyword in keywords):
                     current_section = section
-                    section_confidence = 9
-                    section_transition_detected = True
-                    self.extraction_logger.info(f"[SECTION TRANSITION] '{original_desc}' -> {section} (major_section_transition)")
+                    found_header = True
                     break
             
-            # Check for section boundary keywords that force transitions
-            if not section_transition_detected:
-                for boundary_type, keywords in section_boundary_keywords.items():
-                    for kw in keywords:
-                        if normalize(kw) == desc:
-                            print(f"[DEBUG] Section boundary hit: '{desc}' matches '{kw}'")
-                            if boundary_type == 'assets_to_liabilities':
-                                if any(liability_keyword in desc for liability_keyword in ['current portion', 'payable', 'accrued']):
-                                    current_section = 'current_liabilities'
-                                else:
-                                    current_section = 'noncurrent_liabilities'
-                                section_confidence = 9
-                                section_transition_detected = True
-                                self.extraction_logger.info(f"[SECTION BOUNDARY] '{original_desc}' -> {current_section} (assets_to_liabilities_boundary)")
-                                break
-                            elif boundary_type == 'liabilities_to_equity':
-                                current_section = 'equity'
-                                section_confidence = 9
-                                section_transition_detected = True
-                                self.extraction_logger.info(f"[SECTION BOUNDARY] '{original_desc}' -> {current_section} (liabilities_to_equity_boundary)")
+            # 2. If no header, check for specific item keywords that imply a section change
+            if not found_header:
+                for keyword, section in manual_map.items():
+                    if keyword in desc_lower:
+                        current_section = section
                                 break
             
-            # Manual override (highest priority)
-            if desc in manual_section_map:
-                print(f"[DEBUG] Manual map hit: '{desc}' -> {manual_section_map[desc]}")
-                assigned_section = manual_section_map[desc]
-                debug_reason = 'manual_map'
-                current_section = assigned_section
-                section_confidence = 10
-                self.extraction_logger.info(f"[SECTION ASSIGN] '{original_desc}' -> {assigned_section} (manual_map)")
-            else:
-                # Check for explicit section headers first
-                explicit_section_found = False
-                for section, patterns in section_patterns:
-                    for pat in patterns:
-                        if pat.startswith('^') and pat.endswith('$'):
-                            if re.search(pat, desc):
-                                assigned_section = section
-                                debug_reason = f'exact_regex:{pat}'
-                                current_section = assigned_section
-                                section_confidence = 8
-                                explicit_section_found = True
-                                self.extraction_logger.info(f"[SECTION ASSIGN] '{original_desc}' -> {assigned_section} (exact_regex:{pat})")
-                                break
-                    if explicit_section_found:
-                        break
-                if not explicit_section_found:
-                    # Check for partial section matches (lower confidence)
-                    partial_section_found = False
-                    for section, patterns in section_patterns:
-                        for pat in patterns:
-                            if not pat.startswith('^') and not pat.endswith('$'):
-                                if re.search(pat, desc):
-                                    assigned_section = section
-                                    debug_reason = f'partial_regex:{pat}'
-                                    current_section = assigned_section
-                                    section_confidence = 6
-                                    partial_section_found = True
-                                    self.extraction_logger.info(f"[SECTION ASSIGN] '{original_desc}' -> {assigned_section} (partial_regex:{pat})")
-                                    break
-                        if partial_section_found:
-                            break
-                # If no section header found, use context-based assignment
-                if not explicit_section_found and not partial_section_found:
-                    if current_section:
-                        assigned_section = current_section
-                        section_confidence = 7
-                        debug_reason = 'context_continuation'
-                        self.extraction_logger.info(f"[SECTION ASSIGN] '{original_desc}' -> {assigned_section} (context_continuation)")
-                    else:
-                        # No current section, try semantic fallback
-                        assigned_section = None
-                        debug_reason = 'no_context'
-                        self.extraction_logger.info(f"[SECTION ASSIGN] '{original_desc}' -> None (no_context)")
-            # Semantic fallback only if no section assigned and no current context
-            if not assigned_section and not current_section:
-                best_score = 0
-                best_section = None
-                for section, section_desc in section_semantics.items():
-                    score = self.get_similarity(desc, section_desc)
-                    print(f"[SECTION SEMANTIC DEBUG] '{desc}' vs '{section_desc}' -> score: {score:.3f}")
-                    if score > best_score:
-                        best_score = score
-                        best_section = section
-                if best_score > 0.3:
-                    assigned_section = best_section
-                    current_section = assigned_section
-                    section_confidence = 5
-                    debug_reason = f'semantic:{section_semantics[best_section]}:{best_score:.3f}'
-                    self.extraction_logger.info(f"[SECTION ASSIGN] '{original_desc}' -> {assigned_section} (semantic:{section_semantics[best_section]}:{best_score:.3f})")
-            # Debug output for section assignment
-            if assigned_section is None:
-                prev_desc = normalize(extracted_lines[idx-1]['description']) if idx > 0 else ''
-                next_desc = normalize(extracted_lines[idx+1]['description']) if idx < len(extracted_lines)-1 else ''
-                print(f"[DEBUG] Section=None for '{desc}'. Prev='{prev_desc}' Next='{next_desc}'")
-                self.extraction_logger.info(f"[SECTION ASSIGN] '{original_desc}' -> None (no_match)")
-            else:
-                print(f"[SECTION ASSIGN] '{line['description']}' -> {assigned_section} ({debug_reason}) [confidence:{section_confidence}]")
             assigned.append({
-                'description': line['description'],
-                'value': line['numbers'],  # Keep all numbers, not just the first one
-                'section': assigned_section
+                'description': desc,
+                'value': line.get('numbers', []),
+                'section': current_section
             })
         
         return assigned
@@ -860,210 +667,161 @@ class TemplateMatcher:
     def assign_sections_by_context_is(self, extracted_lines: list) -> list:
         """
         Assigns IS sections to each line item based on its content and context.
-        Returns a list of dicts: {description, value, section}
+        Uses explicit header detection to improve accuracy.
         """
         import re
         
-        # IS section semantics for semantic similarity
-        section_semantics = {
-            'revenue': 'revenue sales income',
-            'operating_expenses': 'operating expenses cost of goods sold depreciation amortization',
-            'other_income_expense': 'interest expense other income expense gain loss',
-            'tax_net_income': 'income tax benefit net profit loss'
-        }
-        
-        def normalize(s):
-            if not s:
-                return ''
-            s = s.lower()
-            s = re.sub(r'[^a-z0-9 ]', ' ', s)  # Remove punctuation
-            s = re.sub(r'\s+', ' ', s)
-            s = s.strip()
-            return s
-
-        # Expanded manual section mapping for IS
-        manual_section_map = {
-            # Revenue items - robust coverage
-            'revenue': 'revenue',
-            'net revenue': 'revenue',
-            'total revenue': 'revenue',
-            'sales': 'revenue',
-            'net sales': 'revenue',
-            'gross sales': 'revenue',
-            'total sales': 'revenue',
-            'operating revenue': 'revenue',
-            'service revenue': 'revenue',
-            'product revenue': 'revenue',
-            'advertising revenue': 'revenue',
-            'broadcasting revenue': 'revenue',
-            'media revenue': 'revenue',
-            'subscription revenue': 'revenue',
-            'license revenue': 'revenue',
-            'commission revenue': 'revenue',
-            'fee revenue': 'revenue',
-            'other revenue': 'revenue',
-            'other income': 'revenue',
-            'miscellaneous revenue': 'revenue',
-            'miscellaneous income': 'revenue',
-        }
-
         assigned = []
-        current_section = None
-        for line in extracted_lines:
-            desc = normalize(line['description'])
-            original_desc = line['description']
+        current_section = None # Start with no section
+        
+        # Section headers to look for (case-insensitive)
+        section_keywords = {
+            'revenue': ['net sales', 'revenue'],
+            'operating_expenses': ['operating costs and expenses', 'operating expenses'],
+            'operating_income': ['operating income'],
+            'other_income_expense': ['other income (expense)', 'other income'],
+            'tax_net_income': ['net income', 'income before', 'comprehensive income']
+        }
 
-            # Log normalized description and regex match to extraction.log
-            self.extraction_logger.info(f"[DEBUG IS] Normalized desc: '{desc}' (original: '{original_desc}')")
-            revenue_match = re.search(r'(sales|revenue)', desc)
-            self.extraction_logger.info(f"[DEBUG IS] Revenue regex match: {bool(revenue_match)} for '{desc}'")
-            if revenue_match:
-                assigned_section = 'revenue'
-                current_section = assigned_section
-                self.extraction_logger.info(f"[SECTION ASSIGN] '{original_desc}' -> {assigned_section} (regex_revenue)")
-            elif desc in manual_section_map:
-                assigned_section = manual_section_map[desc]
-                current_section = assigned_section
-                self.extraction_logger.info(f"[SECTION ASSIGN] '{original_desc}' -> {assigned_section} (manual_map)")
-            else:
-                # Semantic matching
-                best_score = 0
-                best_section = None
-                for section, section_desc in section_semantics.items():
-                    score = self.get_similarity(desc, section_desc)
-                    if score > best_score:
-                        best_score = score
-                        best_section = section
-                if best_score > 0.3:
-                    assigned_section = best_section
-                    current_section = assigned_section
-                    self.extraction_logger.info(f"[SECTION ASSIGN] '{original_desc}' -> {assigned_section} (semantic:{section_semantics[best_section]}:{best_score:.3f})")
-                else:
-                    if current_section:
+        for line in extracted_lines:
+            desc_lower = line['description'].lower()
+            
+            # --- 1. Detect section based on headers ---
+            found_section = False
+            for section, keywords in section_keywords.items():
+                if any(re.search(r'\\b' + keyword + r'\\b', desc_lower) for keyword in keywords):
+                    current_section = section
+                    found_section = True
+                    break
+            
+            # --- 2. If no header, check if it's a known non-op item ---
+            if not found_section:
+                # This part is simplified; can be expanded with more keywords
+                if 'interest' in desc_lower:
+                    current_section = 'other_income_expense'
+
+            # --- 3. Assign section ---
                         assigned_section = current_section
-                        self.extraction_logger.info(f"[SECTION ASSIGN] '{original_desc}' -> {assigned_section} (context_continuation)")
-                    else:
-                        assigned_section = None
-                        self.extraction_logger.info(f"[SECTION ASSIGN] '{original_desc}' -> None (no_context)")
+            
             assigned.append({
                 'description': line['description'],
-                'value': line['numbers'],  # Keep all numbers, not just the first one
+                'value': line['numbers'],  # FIX: Was 'line'
                 'section': assigned_section
             })
+        
         return assigned
 
     def assign_sections_by_context_cfs(self, extracted_lines: list) -> list:
         """
-        Assigns CFS sections to each line item based on its content and context.
-        Returns a list of dicts: {description, value, section}
+        Assigns CFS sections to each line item using a more robust, keyword-based state machine.
+        This correctly handles the final cash reconciliation section.
         """
-        import re
-        
-        # CFS section semantics for semantic similarity
-        section_semantics = {
-            'operating_activities': 'operating activities net income depreciation changes in working capital',
-            'investing_activities': 'investing activities capital expenditure purchase of assets proceeds from sale',
-            'financing_activities': 'financing activities debt issuance stock issuance dividend payment',
-            'other': 'other'
-        }
-        
-        # Manual section mapping for CFS
-        manual_section_map = {
-            'net profit loss': 'operating_activities',
-            'net income': 'operating_activities',
-            'depreciation': 'operating_activities',
-            'deferred income taxes': 'operating_activities',
-            'impairment and other losses': 'operating_activities',
-            'changes in operating assets and liabilities': 'operating_activities',
-            'net cash provided by used in operating activities': 'operating_activities',
-            'purchases of property and equipment': 'investing_activities',
-            'capital expenditure': 'investing_activities',
-            'proceeds from sale of assets': 'investing_activities',
-            'net cash used in investing activities': 'investing_activities',
-            'proceeds from issuance': 'financing_activities',
-            'principal payments': 'financing_activities',
-            'net cash provided by used in financing activities': 'financing_activities'
-        }
-        
-        def normalize(s):
-            if not s:
-                return ''
-            s = s.lower()
-            s = re.sub(r'[\u2013\u2014\u2012\u2010\-]', ' ', s)
-            s = re.sub(r'—', ' ', s)
-            s = re.sub(r'–', ' ', s)
-            s = re.sub(r'\s+', ' ', s)
-            s = s.strip()
-            return s
-        
         assigned = []
-        current_section = None
+        current_section = None  # Start with no section
+
+        # Define keywords that signal the start of a new section
+        section_keywords = {
+            'operating_activities': [
+                'cash flow from operating activities',
+                'cash flows from operating activities',
+                'operating activities'
+            ],
+            'investing_activities': [
+                'cash flow from investing activities',
+                'cash flows from investing activities',
+                'investing activities'
+            ],
+            'financing_activities': [
+                'cash flow from financing activities',
+                'cash flows from financing activities',
+                'financing activities'
+            ],
+            'cash_reconciliation': [
+                'net change in cash',
+                'net increase in cash',
+                'net decrease in cash',
+                'effect of exchange rate',
+                'cash at beginning',
+                'cash and cash equivalents at beginning',
+                'supplemental disclosure' # Often marks the end of main sections
+            ]
+        }
         
         for line in extracted_lines:
-            desc = normalize(line['description'])
-            original_desc = line['description']
+            desc_lower = line['description'].lower().strip()
             
-            # Manual override (highest priority)
-            if desc in manual_section_map:
-                assigned_section = manual_section_map[desc]
-                current_section = assigned_section
-                self.extraction_logger.info(f"[SECTION ASSIGN] '{original_desc}' -> {assigned_section} (manual_map)")
-            else:
-                # Semantic matching
-                best_score = 0
-                best_section = None
-                for section, section_desc in section_semantics.items():
-                    score = self.get_similarity(desc, section_desc)
-                    if score > best_score:
-                        best_score = score
-                        best_section = section
-                
-                if best_score > 0.3:
-                    assigned_section = best_section
-                    current_section = assigned_section
-                    self.extraction_logger.info(f"[SECTION ASSIGN] '{original_desc}' -> {assigned_section} (semantic:{section_semantics[best_section]}:{best_score:.3f})")
-                else:
-                    # Use context continuation
-                    if current_section:
-                        assigned_section = current_section
-                        self.extraction_logger.info(f"[SECTION ASSIGN] '{original_desc}' -> {assigned_section} (context_continuation)")
-                    else:
-                        assigned_section = None
-                        self.extraction_logger.info(f"[SECTION ASSIGN] '{original_desc}' -> None (no_context)")
+            # Check if the line description indicates a new section
+            found_new_section = False
+            for section, keywords in section_keywords.items():
+                if any(keyword in desc_lower for keyword in keywords):
+                    current_section = section
+                    self.extraction_logger.info(f"[SECTION SWITCH] '{line['description']}' -> {current_section}")
+                    found_new_section = True
+                    break
+            
+            # If no section is ever found, we can try a fallback
+            if current_section is None:
+                if 'net income' in desc_lower or 'net loss' in desc_lower:
+                    current_section = 'operating_activities'
             
             assigned.append({
                 'description': line['description'],
-                'value': line['numbers'],  # Keep all numbers, not just the first one
-                'section': assigned_section
+                'value': line.get('numbers', []),
+                'section': current_section
             })
+            
+        # Add the new section to the template definition for mapping
+        if 'cash_reconciliation' not in CFS_SECTION_TEMPLATE:
+             CFS_SECTION_TEMPLATE['cash_reconciliation'] = {
+                 'template': [
+                     'Net change in Cash',
+                     'Starting Cash',
+                     'Ending Cash'
+                 ]
+             }
         
         return assigned
 
-    def get_is_row_map(self, template_items: list, section: str) -> dict:
-        """Get row mapping for IS template items"""
-        # Map IS template items to Excel rows based on the template structure
-        is_row_mapping = {
-            'Revenue': 6,
-            'Other Revenue': 7,
-            'Cost of revenue': 9,
-            'Station operations costs': 10,
-            'Payroll and related costs': 11,
-            'Depreciation and amortization': 12,
-            'Impairment and other losses': 13,
-            'Selling, general and administrative expenses': 14,
-            'Other Operating Expenses': 15,
-            'Interest expense': 16,
-            'Other (income) and expense, net': 17,
-            'Other Income/Expense': 18,
-            'Income tax benefit': 19,
-            'Net profit (loss)': 20
+    def get_is_row_map(self, worksheet, section: str) -> dict:
+        """
+        Returns a mapping of template item descriptions to their row number 
+        for a given IS section by reading directly from the worksheet.
+        This is more robust than using a pre-processed list.
+        """
+        row_map = {}
+        # Correct, non-overlapping sections based on template visual layout
+        section_rows = {
+            'revenue': [(6, 6)],
+            'operating_expenses': [(10, 12)], # Dep, Amort, Impair
+            'other_income_expense': [(13, 15), (19, 19)], # Interest, Other Income, Other
+            'tax_net_income': [(18, 18)] # Tax Expense only
         }
         
-        return {item: is_row_mapping.get(item) for item in template_items if item in is_row_mapping}
+        # Rows that are headers or calculated totals, and should not be mapped to
+        skip_rows = {
+            7: "Operating Expenses", 
+            8: "Operating Income", 
+            16: "Income Before Taxes", 
+            17: "Income Before Taxes",
+            20: "Net Income"
+        }
+
+        ranges = section_rows.get(section, [])
+        if not ranges: return {}
+        
+        for start, end in ranges:
+            for row_num in range(start, end + 1):
+                if row_num in skip_rows:
+                    continue
+                item = worksheet.cell(row=row_num, column=1).value
+                if item:
+                    row_map[item] = row_num
+        return row_map
 
     def get_cfs_row_map(self, template_items: list, section: str) -> dict:
-        """Get row mapping for CFS template items"""
-        # Map CFS template items to Excel rows based on the template structure
+        """
+        Returns a mapping of template item descriptions to their row number for a given CFS section.
+        """
         cfs_row_mapping = {
             'Net profit (loss)': 23,
             'Adjustments to reconcile net profit': 24,
@@ -1087,600 +845,351 @@ class TemplateMatcher:
         return {item: cfs_row_mapping.get(item) for item in template_items if item in cfs_row_mapping}
 
     def map_to_template(self, extracted_data: Dict, template_path: str) -> str:
-        """
-        Map extracted data to template structure using hybrid approach:
-        1. Rule-based filters and regex matching
-        2. Semantic similarity with sentence-transformers
-        3. Confidence scoring and manual review flags
-        """
-        self.used_items = set()
-        output_dir = Path("output_excel")
-        output_dir.mkdir(exist_ok=True)
-        timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-        output_path = output_dir / f"populated_template_{timestamp}.xlsx"
-        shutil.copy2(template_path, output_path)
-        wb = load_workbook(output_path)
+        # Load the template workbook
+        shutil.copy(template_path, "temp_template.xlsx")
+        wb = load_workbook("temp_template.xlsx")
+
+        # Get sheets for BS, IS, CFS
         bs_sheet = wb['BS']
-        is_sheet = wb['IS.CF']  # Add IS/CF sheet definition
-        year_cols = {'2024': 'F', '2023': 'E'}
+        is_cf_sheet = wb['IS.CF']
 
-        # --- Enhanced Section definitions with better categorization ---
-        SECTION_TEMPLATE = {
-            'current_assets': {
-                'rows': list(range(7, 14)),
-                'template': [
-                    'Cash and equivalents', 'Accounts Receivable', 'Prepaid Expenses',
-                    'Inventory', 'Investments', 'Other'
-                ]
-            },
-            'noncurrent_assets': {
-                'rows': list(range(15, 21)),
-                'template': [
-                    'Net PPE', 'Goodwill', 'Intangibles', 'Other'
-                ]
-            },
-            'current_liabilities': {
-                'rows': list(range(24, 30)),
-                'template': [
-                    'Accounts Payable', 'Accrued Interest', 'Short term Borrowing',
-                    'Current Portion of Long Term Debt', 'Other'
-                ]
-            },
-            'noncurrent_liabilities': {
-                'rows': list(range(31, 36)),
-                'template': [
-                    'Long Term Debt', 'Deferred income taxes', 'Other'
-                ]
-            },
-            'equity': {
-                'rows': list(range(39, 44)),
-                'template': [
-                    'Common Stock', 'Retained Earnings', 'Paid in Capital', 'Other'
-                ]
-            }
-        }
+        # Determine year columns from the template (assuming they are in B, C, D, E starting from row 6)
+        year_cols = {}
+        print("DEBUG: Starting year column detection...")
+        # Heuristic: Find years in row 6 of the Balance Sheet
+        for col_idx in range(2, 6): # Check columns B, C, D, E
+            cell_val = bs_sheet.cell(row=6, column=col_idx).value
+            col_letter = openpyxl.utils.get_column_letter(col_idx)
+            print(f"DEBUG: Checking column {col_letter} (row 6): {cell_val} (type: {type(cell_val)})")
+            
+            if isinstance(cell_val, int) and 1990 <= cell_val <= 2050:
+                year_cols[str(cell_val)] = col_letter
+                print(f"DEBUG: Found direct year {cell_val} in column {col_letter}")
+            elif isinstance(cell_val, str) and cell_val.startswith('='):
+                # Handle Excel formulas like "=B6+1" - extract the year
+                print(f"DEBUG: Found formula {cell_val}, attempting to parse...")
+                try:
+                    # Simple parsing for formulas like "=B6+1" where B6 contains 2020
+                    if '+1' in cell_val:
+                        base_cell = cell_val.split('+')[0][1:]  # Extract "B6" from "=B6+1"
+                        base_col = base_cell[0]  # "B"
+                        base_row = int(base_cell[1:])  # 6
+                        base_year = bs_sheet[f"{base_col}{base_row}"].value
+                        print(f"DEBUG: Base cell {base_col}{base_row} contains: {base_year}")
+                        if isinstance(base_year, int):
+                            # Calculate the year for this column
+                            col_offset = col_idx - openpyxl.utils.column_index_from_string(base_col)
+                            calculated_year = base_year + col_offset
+                            print(f"DEBUG: Calculated year: {base_year} + {col_offset} = {calculated_year}")
+                            if 1990 <= calculated_year <= 2050:
+                                year_cols[str(calculated_year)] = col_letter
+                                print(f"DEBUG: Found calculated year {calculated_year} in column {col_letter}")
+                except Exception as e:
+                    print(f"DEBUG: Error parsing formula {cell_val}: {e}")
+                    pass
 
-        # --- Enhanced rule-based mapping with regex patterns ---
-        RULE_BASED_MAP = {
-            # Current Assets
-            r'cash\s+(?:and\s+)?(?:cash\s+)?equivalents?': 'Cash and equivalents',
-            r'accounts?\s+receivable(?:[—-]net)?': 'Accounts Receivable',
-            r'prepaid\s+expenses?': 'Prepaid Expenses',
-            r'inventor(?:y|ies)(?:[—-]net)?': 'Inventory',
-            r'notes?\s+receivable[—-]current\s+portion': 'Accounts Receivable',  # Current portion
-            r'margin\s+deposits?': 'Investments',
-            r'derivative\s+assets?': 'Investments',
-            r'subchapter\s+s\s+income\s+tax\s+deposit[—-]current\s+portion': 'Other',  # Current portion
-            r'other\s+current\s+assets?': 'Other',  # Add this line
-            
-            # Non-Current Assets
-            r'property\s+(?:and\s+)?equipment(?:[—-]net)?': 'Net PPE',
-            r'net\s+ppe': 'Net PPE',
-            r'goodwill(?:[—-]net)?': 'Goodwill',
-            r'(?:other\s+)?intangible\s+assets?(?:[—-]net)?': 'Intangibles',
-            r'right\s+of\s+use\s+assets?(?:[—-]net)?': 'Other',  # Map to Other since no specific template line
-            r'finance\s+lease\s+assets?(?:[—-]net)?': 'Other',  # Map to Other since no specific template line
-            r'deferred\s+compensation\s+plan\s+investments?': 'Other',  # Map to Other since no specific template line
-            r'other\s+noncurrent\s+assets?': 'Other',  # Add this line
-            r'notes?\s+receivable(?!.*current)': 'Other',  # Noncurrent notes receivable (no "current" in description)
-            r'subchapter\s+s\s+income\s+tax\s+deposit(?!.*current)': 'Other',  # Noncurrent tax deposit (no "current" in description)
-            
-            # Current Liabilities
-            r'accounts?\s+payable': 'Accounts Payable',
-            r'accrued\s+(?:liabilities?|interest)': 'Accrued Interest',
-            r'revolving\s+lines?\s+of\s+credit': 'Short term Borrowing',
-            r'long[- ]term\s+debt[—-]current\s+portion': 'Current Portion of Long Term Debt',
-            r'derivative\s+liabilities?': 'Other',
-            r'sales,?\s+excise\s+and\s+property\s+taxes?\s+payable': 'Other',
-            r'long[- ]term\s+incentive[—-]current\s+portion': 'Other',
-            r'contingent\s+consideration\s+payable': 'Other',
-            r'finance\s+lease\s+liability[—-]current\s+portion': 'Other',
-            r'operating\s+lease\s+liability[—-]current\s+portion': 'Other',
-            r'other\s+current\s+liabilities?': 'Other',  # Add this line
-            
-            # Non-Current Liabilities
-            r'long[- ]term\s+debt(?!.*current)': 'Long Term Debt',
-            r'deferred\s+income\s+taxes?': 'Deferred income taxes',
-            r'long[- ]term\s+incentive(?!.*current)': 'Other',
-            r'deferred\s+compensation(?!.*plan)': 'Other',
-            r'finance\s+lease\s+liability(?!.*current)': 'Other',
-            r'operating\s+lease\s+liability(?!.*current)': 'Other',
-            r'other\s+noncurrent\s+liabilities?': 'Other',  # Add this line
-            
-            # Equity
-            r'common\s+stock': 'Common Stock',
-            r'retained\s+earnings?': 'Retained Earnings',
-            r'paid[- ]in\s+capital': 'Paid in Capital',
-            r'total\s+common\s+shareholders?\s+equity': 'Retained Earnings',  # Map to Retained Earnings as main equity
-            r'noncontrolling\s+interests?': 'Other (Equity)',  # Map to Other (Equity) specifically
-        }
+        if not year_cols:
+            print("ERROR: Could not determine year columns from template. Aborting.")
+            return ""
 
-        def normalize(s):
-            """Enhanced normalization with better preprocessing"""
-            import re
-            try:
-                from nltk.stem import PorterStemmer
-                stemmer = PorterStemmer()
-                def stem_word(word):
-                    return stemmer.stem(word)
-            except ImportError:
-                def stem_word(word):
-                    return word.rstrip('s')
-            
-            if not s:
-                return ''
-            
-            s = s.lower()
-            # Remove common financial suffixes
-            s = re.sub(r'[—-]net\b', '', s)
-            s = re.sub(r'[—-]current\s+portion\b', '', s)
-            s = re.sub(r'\bportion\b', '', s)
-            s = re.sub(r'\bcurrent\b', '', s)
-            s = re.sub(r'\bnoncurrent\b', '', s)
-            s = re.sub(r'\bof\b', '', s)
-            s = re.sub(r'\bthe\b', '', s)
-            s = re.sub(r'\band\b', '', s)
-            # Remove punctuation and normalize spaces
-            s = re.sub(r'[^\w\s]', ' ', s)
-            s = re.sub(r'\s+', ' ', s)
-            s = s.strip()
-            # Stem each word
-            s = ' '.join(stem_word(word) for word in s.split())
-            return s
+        print(f"DEBUG: Found year columns in template: {year_cols}")
 
-        def apply_rule_based_mapping(description: str) -> tuple[str, float]:
-            """Apply rule-based mapping with confidence scoring"""
-            desc_lower = description.lower()
-            
-            # Check for exact matches first
-            for pattern, template_item in RULE_BASED_MAP.items():
-                if re.search(pattern, desc_lower, re.IGNORECASE):
-                    return template_item, 1.0  # High confidence for rule-based matches
-            
-            return None, 0.0
-
-        def get_semantic_match(description: str, template_items: list, section: str) -> tuple[str, float]:
-            """Get semantic match with confidence scoring"""
-            desc_norm = normalize(description)
-            best_match = None
-            best_score = 0.0
-            
-            for template_item in template_items:
-                template_norm = normalize(template_item)
-                score = self.get_similarity(desc_norm, template_norm)
-                
-                # Add section-specific bonuses
-                if section == 'current_assets':
-                    if any(term in desc_norm for term in ['cash', 'receivable', 'inventory', 'prepaid']):
-                        score += 0.1
-                elif section == 'noncurrent_assets':
-                    if any(term in desc_norm for term in ['property', 'equipment', 'goodwill', 'intangible']):
-                        score += 0.1
-                elif section == 'current_liabilities':
-                    if any(term in desc_norm for term in ['payable', 'accrued', 'debt', 'borrowing']):
-                        score += 0.1
-                elif section == 'noncurrent_liabilities':
-                    if any(term in desc_norm for term in ['debt', 'deferred', 'lease', 'liability']):
-                        score += 0.1
-                elif section == 'equity':
-                    if any(term in desc_norm for term in ['stock', 'equity', 'capital', 'earning']):
-                        score += 0.1
-                
-                if score > best_score:
-                    best_score = score
-                    best_match = template_item
-            
-            return best_match, best_score
-
-        # --- Enhanced mapping logic ---
+        # --- Balance Sheet Mapping ---
         if 'balance_sheet' in extracted_data:
-            for year in ['2024', '2023']:
-                if year not in extracted_data['balance_sheet']:
+            print("\n--- Processing Balance Sheet ---")
+            
+            # --- Get Balance Sheet row maps ---
+            row_maps = {
+                'current_assets': self.get_bs_row_map(bs_sheet, 7, 12),
+                'noncurrent_assets': self.get_bs_row_map(bs_sheet, 15, 18),
+                'current_liabilities': self.get_bs_row_map(bs_sheet, 23, 28),
+                'noncurrent_liabilities': self.get_bs_row_map(bs_sheet, 31, 34),
+                'equity': self.get_bs_row_map(bs_sheet, 38, 41)
+            }
+            
+            for year, year_data in extracted_data['balance_sheet'].items():
+                if str(year) not in year_cols:
+                    print(f"Warning: Year {year} from PDF not found in template columns. Skipping.")
                     continue
                 
-                # Build ordered list of lines for this year
-                lines = []
-                for desc, value in extracted_data['balance_sheet'][year].items():
-                    lines.append({'description': desc, 'numbers': [value] if value is not None else []})
+                col = year_cols[str(year)]
+                print(f"\n--- Mapping year {year} to column {col} ---")
                 
-                # Assign sections by context
-                assigned = self.assign_sections_by_context(lines)
-                self.print_section_assignments(assigned, year, 'balance_sheet')
+                # Assign sections to all items for this year
+                # We need to convert the data to the format the section assigner expects
+                bs_lines_for_year = [{'description': d, 'numbers': [v]} for d, v in year_data.items()]
+                assigned_bs_lines = self.assign_sections_by_context(bs_lines_for_year)
                 
-                # For each section, map to template
-                for section, section_info in SECTION_TEMPLATE.items():
-                    col = year_cols[year]
-                    template_items = section_info['template']
-                    row_map = {template_items[i]: section_info['rows'][i] for i in range(len(template_items))}
-                    used_template_rows = set()
-                    used_extracted = set()
-                    other_sum = 0
-                    manual_review_items = []  # Track items needing manual review
-                    # --- NEW: Accumulate values for each template line ---
-                    accumulated_values = {t: 0.0 for t in template_items}
-                    # --- NEW: Track section sum for total detection ---
-                    section_sum = 0.0
-                    # Step 1: Prioritize Total/Net rows (but skip mapping them)
-                    for entry in assigned:
-                        if entry['section'] != section or entry['value'] is None:
-                            continue
-                        # --- NEW: Detect total rows ---
+                self.print_section_assignments(assigned_bs_lines, year, 'balance_sheet')
+
+                # Group items by their assigned section
+                section_data = defaultdict(list)
+                for item in assigned_bs_lines:
+                    # item is {'description': ..., 'value': [...], 'section': ...}
+                    if item.get('section') and item.get('value'):
+                        section_data[item['section']].append({
+                            'description': item['description'],
+                            'value': item['value'][0] # We process one year at a time
+                        })
+
+                # Map each section
+                for section, items in section_data.items():
+                    row_map = row_maps.get(section)
+                    if not row_map:
+                        print(f"Warning: No row map found for section '{section}'. Skipping.")
+                        continue
+                        
+                    template_items = list(row_map.keys())
+                    print(f"\n[DEBUG] Mapping section '{section}'. Template items: {template_items}")
+
+                    accumulated_values = defaultdict(float)
+                    other_sum = 0.0
+
+                    for entry in items:
                         desc = entry['description']
-                        val = float(entry['value'])
-                        is_total = self.is_total_or_net_row(desc)
-                        is_empty_total = (not desc or desc.strip() == '') and abs(val - section_sum) < 2.0 and section_sum > 0
-                        if is_total or is_empty_total:
-                            print(f"[SKIP TOTAL] '{desc}' ({val}) matches section sum ({section_sum}) or total pattern; skipping mapping.")
-                            self.extraction_logger.info(f"[SKIP TOTAL] '{desc}' ({val}) - skipping total/net row in accumulation")
-                            continue  # Skip mapping totals
-                        # Step 2a: Try rule-based mapping first
-                        rule_match, rule_confidence = apply_rule_based_mapping(desc)
-                        if rule_match and rule_match in template_items:
-                            accumulated_values[rule_match] += val
-                            section_sum += val
-                            used_extracted.add(desc)
-                            print(f"[ACCUMULATE RULE] '{desc}' ({val}) -> {section}::{rule_match}")
-                            self.extraction_logger.info(f"[TEMPLATE MAP] '{desc}' ({val}) -> {section}::{rule_match} (rule_based)")
-                            # --- FIX: Also add to other_sum if rule_match is "Other" ---
-                            if rule_match == 'Other':
-                                other_sum += val
+                        val_str = entry['value']
+                        if val_str is None: continue
+
+                        try:
+                            val = float(re.sub(r'[^\d\.-]', '', str(val_str)))
+                        except (ValueError, TypeError):
+                            print(f"Warning: Could not convert value to float for '{desc}': {val_str}")
                             continue
-                        # Step 2b: Try semantic matching
-                        semantic_match, semantic_score = get_semantic_match(desc, template_items, section)
-                        if semantic_match:
-                            if semantic_score >= 0.4:
-                                accumulated_values[semantic_match] += val
-                                section_sum += val
-                                used_extracted.add(desc)
-                                print(f"[ACCUMULATE SEMANTIC] '{desc}' ({val}) -> {section}::{semantic_match} [confidence: {semantic_score:.2f}]")
-                                self.extraction_logger.info(f"[TEMPLATE MAP] '{desc}' ({val}) -> {section}::{semantic_match} (semantic:{semantic_score:.2f})")
-                                # --- FIX: Also add to other_sum if semantic_match is "Other" ---
-                                if semantic_match == 'Other':
-                                    other_sum += val
+
+                        # Skip total/net rows from being mapped to specific items
+                        if self.is_total_or_net_row(desc):
+                            print(f"  [SKIP TOTAL] '{desc}' is a total/subtotal row.")
+                    continue
+                
+                        # Use the hybrid mapping function
+                        target_item, score, method = self.hybrid_map_item(desc, template_items, section, 'balance_sheet')
+
+                        if target_item and score >= 0.4:
+                            accumulated_values[target_item] += val
+                            print(f"  [ACCUMULATE HYBRID] '{desc}' ({val}) -> {section}::{target_item} [conf: {score:.2f}, method: {method}]")
                             else:
-                                # --- FIX: Only add to Other if not a total/net row ---
-                                if not self.is_total_or_net_row(desc):
+                            # If it's not a confident match, add it to 'Other' for this section
                                     other_sum += val
-                                    section_sum += val
-                                    used_extracted.add(desc)
-                                    print(f"[ACCUMULATE OTHER] '{desc}' ({val}) -> {section}::Other [best semantic: {semantic_match} ({semantic_score:.2f})]")
-                                    self.extraction_logger.info(f"[TEMPLATE MAP] '{desc}' ({val}) -> {section}::Other (semantic_fallback:{semantic_match}:{semantic_score:.2f})")
-                        else:
-                            # --- FIX: Only add to Other if not a total/net row ---
-                            if not self.is_total_or_net_row(desc):
-                                other_sum += val
-                                section_sum += val
-                                used_extracted.add(desc)
-                                print(f"[ACCUMULATE OTHER] '{desc}' ({val}) -> {section}::Other (no semantic match)")
-                                self.extraction_logger.info(f"[TEMPLATE MAP] '{desc}' ({val}) -> {section}::Other (no_match)")
-                            else:
-                                print(f"[SKIP TOTAL in OTHER] '{desc}' ({val}) would have gone to Other, but is total/net row.")
-                                self.extraction_logger.info(f"[SKIP TOTAL in OTHER] '{desc}' ({val}) - would have gone to Other, but is total/net row")
+                            print(f"  [ACCUMULATE OTHER] '{desc}' ({val}) -> {section}::Other [best match: {target_item}, conf: {score:.2f}]")
+
                     # Write accumulated values to template
-                    for t in template_items:
-                        if t == 'Other':
-                            continue  # Write Other separately
-                        row = row_map[t]
-                        if accumulated_values[t] != 0:
-                            bs_sheet[f"{col}{row}"] = accumulated_values[t]
-                    # Write Other sum if any
-                    if other_sum != 0:
-                        row = row_map['Other']
-                        prev_val = bs_sheet[f"{col}{row}"].value
-                        if prev_val is not None and prev_val != '':
-                            try:
-                                other_sum += float(prev_val)
-                            except Exception:
-                                pass
-                        bs_sheet[f"{col}{row}"] = other_sum
-                        print(f"[OTHER_SUM] {section}::Other (cell {col}{row}) = {other_sum}")
-                        self.extraction_logger.info(f"[WRITE OTHER] {section}::Other (cell {col}{row}) = {other_sum}")
-                    else:
-                        self.extraction_logger.info(f"[NO OTHER] {section}::Other = 0 (no items mapped to Other)")
-                    # Print manual review items (unchanged)
-                    if manual_review_items:
-                        print(f"\n[MANUAL REVIEW NEEDED] {section} {year}:")
-                        for desc, template_item, score in manual_review_items:
-                            print(f"  '{desc}' -> '{template_item}' (confidence: {score:.2f})")
-        
-        # --- Add IS and CFS section structures and templates ---
-        IS_SECTION_TEMPLATE = {
-            'revenue': {
-                'template': [
-                    'Revenue', 'Other Revenue'
-                ]
-            },
-            'operating_expenses': {
-                'template': [
-                    'Cost of revenue', 'Station operations costs', 'Payroll and related costs',
-                    'Depreciation and amortization', 'Impairment and other losses', 'Selling, general and administrative expenses', 'Other Operating Expenses'
-                ]
-            },
-            'other_income_expense': {
-                'template': [
-                    'Interest expense', 'Other (income) and expense, net', 'Other Income/Expense'
-                ]
-            },
-            'tax_net_income': {
-                'template': [
-                    'Income tax benefit', 'Net profit (loss)']
-            }
-        }
+                    for t_item, total_val in accumulated_values.items():
+                        if t_item in row_map and total_val != 0:
+                            row_idx = row_map[t_item]
+                            bs_sheet[f"{col}{row_idx}"] = total_val
+                    
+                    # Write the sum of unmapped items to 'Other' for that section
+                    if 'Other' in row_map and other_sum != 0:
+                        row_idx = row_map['Other']
+                        # Add to existing value if any
+                        existing_val = bs_sheet[f"{col}{row_idx}"].value or 0
+                        if isinstance(existing_val, str): existing_val = 0
+                        bs_sheet[f"{col}{row_idx}"] = existing_val + other_sum
+                        print(f"    [OTHER SUM] Writing {other_sum} to '{section}::Other' in cell {col}{row_idx}")
 
-        CFS_SECTION_TEMPLATE = {
-            'operating_activities': {
-                'template': [
-                    'Net profit (loss)', 'Adjustments to reconcile net profit', 'Depreciation', 'Deferred income taxes', 'Impairment and other losses', 'Changes in operating assets and liabilities', 'Net cash provided by (used in) operating activities', 'Other Operating Activities'
-                ]
-            },
-            'investing_activities': {
-                'template': [
-                    'Purchases of property and equipment', 'Proceeds from sale of assets', 'Net cash used in investing activities', 'Other Investing Activities'
-                ]
-            },
-            'financing_activities': {
-                'template': [
-                    'Proceeds from issuance', 'Principal payments', 'Net cash provided by (used in) financing activities', 'Other Financing Activities'
-                ]
-            },
-            'other': {
-                'template': ['Other']
-            }
-        }
-
-        # --- Add section boundary keywords for IS and CFS ---
-        section_boundary_keywords['is_section_boundaries'] = [
-            'revenue', 'cost of revenue', 'station operations costs', 'payroll and related costs',
-            'depreciation and amortization', 'impairment and other losses', 'selling general and administrative expenses',
-            'income from operations', 'interest expense', 'other income and expense net', 'income tax benefit', 'net profit loss'
-        ]
-        section_boundary_keywords['cfs_section_boundaries'] = [
-            'cash flows from operating activities', 'cash flows from investing activities', 'cash flows from financing activities',
-            'net cash provided by used in operating activities', 'net cash used in investing activities', 'net cash provided by used in financing activities'
-        ]
-
-        # --- Add IS and CFS mapping logic (mirroring BS logic) ---
-        
-        # Income Statement Mapping
+        # --- Income Statement Mapping ---
         if 'income_statement' in extracted_data:
-            for year in ['2024', '2023']:
-                if year not in extracted_data['income_statement']:
+            print("\n--- Processing Income Statement ---")
+            
+            # --- Get IS row map ---
+            is_row_map = self.get_is_row_map(is_cf_sheet)
+            
+            for year, year_data in extracted_data['income_statement'].items():
+                if str(year) not in year_cols:
+                    print(f"Warning: Year {year} from PDF not found in template columns. Skipping.")
                     continue
                 
-                # Build ordered list of lines for this year
-                lines = []
-                for desc, value in extracted_data['income_statement'][year].items():
-                    lines.append({'description': desc, 'numbers': [value] if value is not None else []})
-                
-                # Assign sections by context (using IS-specific logic)
-                assigned = self.assign_sections_by_context_is(lines)
-                self.print_section_assignments(assigned, year, 'income_statement')
-                
-                # For each section, map to template
-                for section, section_info in IS_SECTION_TEMPLATE.items():
-                    col = year_cols[year]
-                    template_items = section_info['template']
-                    # Map template items to IS sheet rows
-                    row_map = self.get_is_row_map(template_items, section)
-                    used_template_rows = set()
-                    used_extracted = set()
-                    other_sum = 0
-                    manual_review_items = []
-                    accumulated_values = {t: 0.0 for t in template_items}
-                    section_sum = 0.0
-                    
-                    # Process each assigned line
-                    for entry in assigned:
-                        if entry['section'] != section or entry['value'] is None:
-                            continue
-                        
-                        desc = entry['description']
-                        val = float(entry['value'])
-                        is_total = self.is_total_or_net_row(desc)
-                        is_empty_total = (not desc or desc.strip() == '') and abs(val - section_sum) < 2.0 and section_sum > 0
-                        
-                        if is_total or is_empty_total:
-                            print(f"[SKIP TOTAL] '{desc}' ({val}) matches section sum ({section_sum}) or total pattern; skipping mapping.")
-                            self.extraction_logger.info(f"[SKIP TOTAL] '{desc}' ({val}) - skipping total/net row in accumulation")
-                            continue
-                        
-                        # Try rule-based mapping first
-                        rule_match, rule_confidence = self.apply_rule_based_mapping_is(desc)
-                        if rule_match and rule_match in template_items:
-                            accumulated_values[rule_match] += val
-                            section_sum += val
-                            used_extracted.add(desc)
-                            print(f"[ACCUMULATE RULE] '{desc}' ({val}) -> {section}::{rule_match}")
-                            self.extraction_logger.info(f"[TEMPLATE MAP] '{desc}' ({val}) -> {section}::{rule_match} (rule_based)")
-                            if rule_match == 'Other Operating Expenses':
-                                other_sum += val
-                            continue
-                        
-                        # Try semantic matching
-                        semantic_match, semantic_score = self.get_semantic_match_is(desc, template_items, section)
-                        if semantic_match:
-                            if semantic_score >= 0.4:
-                                accumulated_values[semantic_match] += val
-                                section_sum += val
-                                used_extracted.add(desc)
-                                print(f"[ACCUMULATE SEMANTIC] '{desc}' ({val}) -> {section}::{semantic_match} [confidence: {semantic_score:.2f}]")
-                                self.extraction_logger.info(f"[TEMPLATE MAP] '{desc}' ({val}) -> {section}::{semantic_match} (semantic:{semantic_score:.2f})")
-                                if semantic_match == 'Other Operating Expenses':
-                                    other_sum += val
-                            else:
-                                if not self.is_total_or_net_row(desc):
-                                    other_sum += val
-                                    section_sum += val
-                                    used_extracted.add(desc)
-                                    print(f"[ACCUMULATE OTHER] '{desc}' ({val}) -> {section}::Other Operating Expenses [best semantic: {semantic_match} ({semantic_score:.2f})]")
-                                    self.extraction_logger.info(f"[TEMPLATE MAP] '{desc}' ({val}) -> {section}::Other Operating Expenses (semantic_fallback:{semantic_match}:{semantic_score:.2f})")
-                        else:
-                            if not self.is_total_or_net_row(desc):
-                                other_sum += val
-                                section_sum += val
-                                used_extracted.add(desc)
-                                print(f"[ACCUMULATE OTHER] '{desc}' ({val}) -> {section}::Other Operating Expenses (no semantic match)")
-                                self.extraction_logger.info(f"[TEMPLATE MAP] '{desc}' ({val}) -> {section}::Other Operating Expenses (no_match)")
-                            else:
-                                print(f"[SKIP TOTAL in OTHER] '{desc}' ({val}) would have gone to Other, but is total/net row.")
-                                self.extraction_logger.info(f"[SKIP TOTAL in OTHER] '{desc}' ({val}) - would have gone to Other, but is total/net row")
-                    
-                    # Write accumulated values to template
-                    for t in template_items:
-                        if t == 'Other Operating Expenses':
-                            continue  # Write Other separately
-                        if t in row_map:
-                            row = row_map[t]
-                            if accumulated_values[t] != 0:
-                                is_sheet[f"{col}{row}"] = accumulated_values[t]
-                                print(f"[WRITE IS] {section}::{t} (cell {col}{row}) = {accumulated_values[t]}")
-                                self.extraction_logger.info(f"[WRITE IS] {section}::{t} (cell {col}{row}) = {accumulated_values[t]}")
-                    
-                    # Write Other sum if any
-                    if other_sum != 0 and 'Other Operating Expenses' in row_map:
-                        row = row_map['Other Operating Expenses']
-                        prev_val = is_sheet[f"{col}{row}"].value
-                        if prev_val is not None and prev_val != '':
-                            try:
-                                other_sum += float(prev_val)
-                            except Exception:
-                                pass
-                        is_sheet[f"{col}{row}"] = other_sum
-                        print(f"[OTHER_SUM] {section}::Other Operating Expenses (cell {col}{row}) = {other_sum}")
-                        self.extraction_logger.info(f"[WRITE OTHER] {section}::Other Operating Expenses (cell {col}{row}) = {other_sum}")
-                    else:
-                        self.extraction_logger.info(f"[NO OTHER] {section}::Other Operating Expenses = 0 (no items mapped to Other)")
-                    
-                    # Print manual review items
-                    if manual_review_items:
-                        print(f"\n[MANUAL REVIEW NEEDED] {section} {year}:")
-                        for desc, template_item, score in manual_review_items:
-                            print(f"  '{desc}' -> '{template_item}' (confidence: {score:.2f})")
+                col = year_cols[str(year)]
+                print(f"\n--- Mapping year {year} to column {col} ---")
 
-        # Cash Flow Statement Mapping
+                is_lines_for_year = [{'description': d, 'numbers': [v]} for d, v in year_data.items()]
+                assigned_is_lines = self.assign_sections_by_context_is(is_lines_for_year)
+                
+                self.print_section_assignments(assigned_is_lines, year, 'income_statement')
+                
+                section_data = defaultdict(list)
+                for item in assigned_is_lines:
+                    if item.get('section') and item.get('value'):
+                        section_data[item['section']].append({
+                            'description': item['description'],
+                            'value': item['value'][0]
+                        })
+
+                for section, items in section_data.items():
+                    template_items = IS_SECTION_TEMPLATE.get(section, {}).get('template', [])
+                    if not template_items: continue
+
+                    print(f"\n[DEBUG] Mapping IS section '{section}'. Template items: {template_items}")
+                    
+                    accumulated_values = defaultdict(float)
+                    other_sum = 0.0
+                    
+                    for entry in items:
+                        desc = entry['description']
+                        val_str = entry['value']
+                        if val_str is None: continue
+                        
+                        try:
+                            val = float(re.sub(r'[^\d\.-]', '', str(val_str)))
+                        except (ValueError, TypeError):
+                            continue
+                        
+                        if self.is_total_or_net_row(desc):
+                            print(f"  [SKIP TOTAL] '{desc}' is a total/subtotal row.")
+                            continue
+                        
+                        target_item, score, method = self.hybrid_map_item(desc, template_items, section, 'income_statement')
+                        
+                        if target_item and score >= 0.4:
+                            accumulated_values[target_item] += val
+                            print(f"  [ACCUMULATE HYBRID] '{desc}' ({val}) -> {section}::{target_item} [conf: {score:.2f}, method: {method}]")
+                            else:
+                                    other_sum += val
+                            print(f"  [ACCUMULATE OTHER] '{desc}' ({val}) -> {section}::Other")
+                    
+                    # Write values
+                    for t_item, total_val in accumulated_values.items():
+                        if t_item in is_row_map:
+                            row_idx = is_row_map[t_item]
+                            is_cf_sheet[f"{col}{row_idx}"] = total_val
+                    
+                    # Write 'Other' sum
+                    other_category_name = self.get_other_category_for_is_section(section)
+                    if other_category_name and other_category_name in is_row_map and other_sum != 0:
+                        row_idx = is_row_map[other_category_name]
+                        existing_val = is_cf_sheet[f"{col}{row_idx}"].value or 0
+                        if isinstance(existing_val, str): existing_val = 0
+                        is_cf_sheet[f"{col}{row_idx}"] = existing_val + other_sum
+                        print(f"    [OTHER SUM] Writing {other_sum} to '{other_category_name}' in cell {col}{row_idx}")
+
+        # --- Cash Flow Statement Mapping ---
         if 'cash_flow' in extracted_data:
-            for year in ['2024', '2023']:
-                if year not in extracted_data['cash_flow']:
+            print("\n--- Processing Cash Flow Statement ---")
+            
+            cfs_row_map = self.get_cfs_row_map(is_cf_sheet)
+
+            for year, year_data in extracted_data['cash_flow'].items():
+                if str(year) not in year_cols:
                     continue
                 
-                # Build ordered list of lines for this year
-                lines = []
-                for desc, value in extracted_data['cash_flow'][year].items():
-                    lines.append({'description': desc, 'numbers': [value] if value is not None else []})
+                col = year_cols[str(year)]
+                print(f"\n--- Mapping year {year} to column {col} ---")
                 
-                # Assign sections by context (using CFS-specific logic)
-                assigned = self.assign_sections_by_context_cfs(lines)
-                self.print_section_assignments(assigned, year, 'cash_flow')
+                cfs_lines_for_year = [{'description': d, 'numbers': [v]} for d, v in year_data.items()]
+                assigned_cfs_lines = self.assign_sections_by_context_cfs(cfs_lines_for_year)
                 
-                # For each section, map to template
-                for section, section_info in CFS_SECTION_TEMPLATE.items():
-                    col = year_cols[year]
-                    template_items = section_info['template']
-                    # Map template items to CFS sheet rows
-                    row_map = self.get_cfs_row_map(template_items, section)
-                    used_template_rows = set()
-                    used_extracted = set()
-                    other_sum = 0
-                    manual_review_items = []
-                    accumulated_values = {t: 0.0 for t in template_items}
-                    section_sum = 0.0
+                self.print_section_assignments(assigned_cfs_lines, year, 'cash_flow')
+                
+                section_data = defaultdict(list)
+                for item in assigned_cfs_lines:
+                    if item.get('section') and item.get('value'):
+                        section_data[item['section']].append({
+                            'description': item['description'],
+                            'value': item['value'][0]
+                        })
+                
+                for section, items in section_data.items():
+                    template_items = CFS_SECTION_TEMPLATE.get(section, {}).get('template', [])
+                    if not template_items: continue
                     
-                    # Process each assigned line
-                    for entry in assigned:
-                        if entry['section'] != section or entry['value'] is None:
-                            continue
-                        
+                    print(f"\n[DEBUG] Mapping CFS section '{section}'. Template items: {template_items}")
+                    
+                    accumulated_values = defaultdict(float)
+                    other_sum = 0.0
+
+                    for entry in items:
                         desc = entry['description']
-                        val = float(entry['value'])
-                        is_total = self.is_total_or_net_row(desc)
-                        is_empty_total = (not desc or desc.strip() == '') and abs(val - section_sum) < 2.0 and section_sum > 0
+                        val_str = entry['value']
+                        if val_str is None: continue
                         
-                        if is_total or is_empty_total:
-                            print(f"[SKIP TOTAL] '{desc}' ({val}) matches section sum ({section_sum}) or total pattern; skipping mapping.")
-                            self.extraction_logger.info(f"[SKIP TOTAL] '{desc}' ({val}) - skipping total/net row in accumulation")
+                        try:
+                            val = float(re.sub(r'[^\d\.-]', '', str(val_str)))
+                        except (ValueError, TypeError): continue
+                        
+                        if self.is_total_or_net_row(desc):
+                            print(f"  [SKIP TOTAL] '{desc}' is a total/subtotal row.")
                             continue
                         
-                        # Try rule-based mapping first
-                        rule_match, rule_confidence = self.apply_rule_based_mapping_cfs(desc)
-                        if rule_match and rule_match in template_items:
-                            accumulated_values[rule_match] += val
-                            section_sum += val
-                            used_extracted.add(desc)
-                            print(f"[ACCUMULATE RULE] '{desc}' ({val}) -> {section}::{rule_match}")
-                            self.extraction_logger.info(f"[TEMPLATE MAP] '{desc}' ({val}) -> {section}::{rule_match} (rule_based)")
-                            if 'Other' in rule_match:
-                                other_sum += val
-                            continue
+                        target_item, score, method = self.hybrid_map_item(desc, template_items, section, 'cash_flow')
                         
-                        # Try semantic matching
-                        semantic_match, semantic_score = self.get_semantic_match_cfs(desc, template_items, section)
-                        if semantic_match:
-                            if semantic_score >= 0.4:
-                                accumulated_values[semantic_match] += val
-                                section_sum += val
-                                used_extracted.add(desc)
-                                print(f"[ACCUMULATE SEMANTIC] '{desc}' ({val}) -> {section}::{semantic_match} [confidence: {semantic_score:.2f}]")
-                                self.extraction_logger.info(f"[TEMPLATE MAP] '{desc}' ({val}) -> {section}::{semantic_match} (semantic:{semantic_score:.2f})")
-                                if 'Other' in semantic_match:
-                                    other_sum += val
+                        if target_item and score >= 0.4:
+                            accumulated_values[target_item] += val
+                            print(f"  [ACCUMULATE HYBRID] '{desc}' ({val}) -> {section}::{target_item} [conf: {score:.2f}, method: {method}]")
                             else:
-                                if not self.is_total_or_net_row(desc):
                                     other_sum += val
-                                    section_sum += val
-                                    used_extracted.add(desc)
-                                    print(f"[ACCUMULATE OTHER] '{desc}' ({val}) -> {section}::Other [best semantic: {semantic_match} ({semantic_score:.2f})]")
-                                    self.extraction_logger.info(f"[TEMPLATE MAP] '{desc}' ({val}) -> {section}::Other (semantic_fallback:{semantic_match}:{semantic_score:.2f})")
-                        else:
-                            if not self.is_total_or_net_row(desc):
-                                other_sum += val
-                                section_sum += val
-                                used_extracted.add(desc)
-                                print(f"[ACCUMULATE OTHER] '{desc}' ({val}) -> {section}::Other (no semantic match)")
-                                self.extraction_logger.info(f"[TEMPLATE MAP] '{desc}' ({val}) -> {section}::Other (no_match)")
-                            else:
-                                print(f"[SKIP TOTAL in OTHER] '{desc}' ({val}) would have gone to Other, but is total/net row.")
-                                self.extraction_logger.info(f"[SKIP TOTAL in OTHER] '{desc}' ({val}) - would have gone to Other, but is total/net row")
+                            print(f"  [ACCUMULATE OTHER] '{desc}' ({val}) -> {section}::Other")
                     
-                    # Write accumulated values to template
-                    for t in template_items:
-                        if 'Other' in t:
-                            continue  # Write Other separately
-                        if t in row_map:
-                            row = row_map[t]
-                            if accumulated_values[t] != 0:
-                                is_sheet[f"{col}{row}"] = accumulated_values[t]
-                                print(f"[WRITE CFS] {section}::{t} (cell {col}{row}) = {accumulated_values[t]}")
-                                self.extraction_logger.info(f"[WRITE CFS] {section}::{t} (cell {col}{row}) = {accumulated_values[t]}")
-                    
-                    # Write Other sum if any
-                    if other_sum != 0 and any('Other' in t for t in template_items):
-                        other_template = next(t for t in template_items if 'Other' in t)
-                        if other_template in row_map:
-                            row = row_map[other_template]
-                            prev_val = is_sheet[f"{col}{row}"].value
-                            if prev_val is not None and prev_val != '':
-                                try:
-                                    other_sum += float(prev_val)
-                                except Exception:
-                                    pass
-                            is_sheet[f"{col}{row}"] = other_sum
-                            print(f"[OTHER_SUM] {section}::{other_template} (cell {col}{row}) = {other_sum}")
-                            self.extraction_logger.info(f"[WRITE OTHER] {section}::{other_template} (cell {col}{row}) = {other_sum}")
-                        else:
-                            self.extraction_logger.info(f"[NO OTHER] {section}::Other = 0 (no items mapped to Other)")
-                    
-                    # Print manual review items
-                    if manual_review_items:
-                        print(f"\n[MANUAL REVIEW NEEDED] {section} {year}:")
-                        for desc, template_item, score in manual_review_items:
-                            print(f"  '{desc}' -> '{template_item}' (confidence: {score:.2f})")
+                    # Write values
+                    for t_item, total_val in accumulated_values.items():
+                        if t_item in cfs_row_map:
+                            row_idx = cfs_row_map[t_item]
+                            is_cf_sheet[f"{col}{row_idx}"] = total_val
+                            
+                    # Write 'Other' sum
+                    other_category_name = self.get_other_category_for_cfs_section(section)
+                    if other_category_name and other_category_name in cfs_row_map and other_sum != 0:
+                        row_idx = cfs_row_map[other_category_name]
+                        existing_val = is_cf_sheet[f"{col}{row_idx}"].value or 0
+                        if isinstance(existing_val, str): existing_val = 0
+                        is_cf_sheet[f"{col}{row_idx}"] = existing_val + other_sum
+                        print(f"    [OTHER SUM] Writing {other_sum} to '{other_category_name}' in cell {col}{row_idx}")
 
-        # --- Add debug output for IS and CFS mapping (mirroring BS logic) ---
-        # (The rest of the code for section assignment and mapping should mirror the robust logic used for the balance sheet, using the new IS and CFS structures, manual mapping, and boundaries.)
+        # Save the populated template
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        current_dir = Path(__file__).resolve().parent
+        project_root = current_dir.parent.parent
+        output_dir = project_root / "output_excel"
+        output_dir.mkdir(exist_ok=True)
+        
+        populated_template_path = output_dir / f"populated_template_{timestamp}.xlsx"
+        wb.save(populated_template_path)
+        Path("temp_template.xlsx").unlink()
+        print(f"\nTemplate populated and saved to: {populated_template_path}")
+        return str(populated_template_path)
 
-        wb.save(output_path)
-        self.extraction_logger.info("\n==== MAPPING TO TEMPLATE END ====")
-        return str(output_path)
+    def get_bs_row_map(self, sheet, start_row, end_row):
+        """Helper to get row map for a BS section."""
+        row_map = {}
+        for row in range(start_row, end_row + 1):
+            cell_val = sheet.cell(row=row, column=1).value
+            if cell_val:
+                row_map[cell_val] = row
+        return row_map
+    
+    def get_is_row_map(self, sheet):
+        """Helper to get row map for the entire IS."""
+        row_map = {}
+        # Iterate over all defined IS sections and their templates
+        for section_info in IS_SECTION_TEMPLATE.values():
+            for item in section_info['template']:
+                # Find this item in column A
+                for row in range(1, sheet.max_row + 1):
+                    if sheet.cell(row=row, column=1).value == item:
+                        row_map[item] = row
+                        break
+        return row_map
+        
+    def get_cfs_row_map(self, sheet):
+        """Helper to get row map for the entire CFS."""
+        row_map = {}
+        for section_info in CFS_SECTION_TEMPLATE.values():
+            for item in section_info['template']:
+                for row in range(1, sheet.max_row + 1):
+                    if sheet.cell(row=row, column=1).value == item:
+                        row_map[item] = row
+                        break
+        return row_map
+        
+    def get_other_category_for_is_section(self, section: str) -> Optional[str]:
+        if section == 'operating_expenses': return 'Other Operating Expenses'
+        if section == 'other_income_expense': return 'Other Income/Expense'
+        return None
+
+    def get_other_category_for_cfs_section(self, section: str) -> Optional[str]:
+        if section == 'operating_activities': return 'Other Operating Activities'
+        if section == 'investing_activities': return 'Other Investing Activities'
+        if section == 'financing_activities': return 'Other Financing Activities'
+        return None
 
     def print_section_assignments(self, assigned_lines: list, year: str, statement_type: str):
         print(f"\nSection assignments for {statement_type} {year}:")
@@ -1702,64 +1211,51 @@ class TemplateMatcher:
             return False
         return any(re.search(pattern, desc_lower) for pattern in self.TOTAL_NET_PATTERNS)
 
-    def apply_rule_based_mapping_is(self, description: str) -> tuple[str, float]:
-        """Apply rule-based mapping for IS items"""
+    def apply_rule_based_mapping(self, description: str) -> tuple[str, float]:
+        """Apply rule-based mapping for balance sheet items"""
         import re
         desc_lower = description.lower()
         
-        # IS-specific rule-based mapping with comprehensive revenue coverage
+        # Balance sheet rule-based mapping
+        bs_rules = {
+            r'cash\s+(?:and\s+)?(?:cash\s+)?equivalents?': 'Cash and equivalents',
+            r'accounts?\s+receivable(?:[—-]net)?': 'Accounts Receivable',
+            r'prepaid\s+expenses?': 'Prepaid Expenses',
+            r'inventor(?:y|ies)(?:[—-]net)?': 'Inventory',
+            r'property\s+(?:and\s+)?equipment(?:[—-]net)?': 'Net PPE',
+            r'net\s+ppe': 'Net PPE',
+            r'goodwill(?:[—-]net)?': 'Goodwill',
+            r'(?:other\s+)?intangible\s+assets?(?:[—-]net)?': 'Intangibles',
+            r'accounts?\s+payable': 'Accounts Payable',
+            r'accrued\s+(?:liabilities?|interest)': 'Accrued Interest',
+            r'long[- ]term\s+debt(?!.*current)': 'Long Term Debt',
+            r'deferred\s+income\s+taxes?': 'Deferred income taxes',
+            r'common\s+stock': 'Common Stock',
+            r'retained\s+earnings?': 'Retained Earnings',
+            r'paid[- ]in\s+capital': 'Paid in Capital'
+        }
+        
+        for pattern, template_item in bs_rules.items():
+            if re.search(pattern, desc_lower):
+                return template_item, 0.9
+        
+        return None, 0.0
+
+    def apply_rule_based_mapping_is(self, description: str) -> tuple[str, float]:
+        """Apply rule-based mapping for income statement items"""
+        import re
+        desc_lower = description.lower()
+        
+        # Income statement rule-based mapping
         is_rules = {
-            # Revenue items - all map to main Revenue line
-            r'revenue': 'Revenue',
-            r'sales': 'Revenue',
-            r'net\s+(?:revenue|sales)': 'Revenue',
-            r'gross\s+(?:revenue|sales)': 'Revenue',
-            r'total\s+(?:revenue|sales)': 'Revenue',
-            r'operating\s+revenue': 'Revenue',
-            r'service\s+revenue': 'Revenue',
-            r'product\s+revenue': 'Revenue',
-            r'advertising\s+revenue': 'Revenue',
-            r'broadcasting\s+revenue': 'Revenue',
-            r'media\s+revenue': 'Revenue',
-            r'subscription\s+revenue': 'Revenue',
-            r'license\s+revenue': 'Revenue',
-            r'commission\s+revenue': 'Revenue',
-            r'fee\s+revenue': 'Revenue',
-            r'other\s+revenue': 'Revenue',
-            r'other\s+income': 'Revenue',
-            r'miscellaneous\s+(?:revenue|income)': 'Revenue',
-            
-            # Operating expenses
-            r'cost\s+of\s+(?:revenue|goods\s+sold|sales)': 'Cost of revenue',
-            r'station\s+operations?\s+costs?': 'Station operations costs',
-            r'payroll': 'Payroll and related costs',
-            r'depreciation': 'Depreciation and amortization',
-            r'amortization': 'Depreciation and amortization',
-            r'impairment': 'Impairment and other losses',
-            r'selling.*administrative': 'Selling, general and administrative expenses',
-            r'sg&a': 'Selling, general and administrative expenses',
-            r'general\s+and\s+administrative': 'Selling, general and administrative expenses',
-            r'administrative\s+expenses?': 'Selling, general and administrative expenses',
-            r'selling\s+expenses?': 'Selling, general and administrative expenses',
-            r'research\s+and\s+development': 'Selling, general and administrative expenses',
-            r'r&d': 'Selling, general and administrative expenses',
-            
-            # Other income/expense
-            r'interest\s+expense': 'Interest expense',
-            r'interest\s+income': 'Other income and expense, net',
-            r'other\s+income\s+and\s+expense': 'Other income and expense, net',
-            r'other\s+income': 'Other income and expense, net',
-            r'other\s+expense': 'Other income and expense, net',
-            r'gain\s+on\s+(?:sale|disposal)': 'Other income and expense, net',
-            r'loss\s+on\s+(?:sale|disposal)': 'Other income and expense, net',
-            r'foreign\s+exchange\s+(?:gain|loss)': 'Other income and expense, net',
-            
-            # Tax and net income
-            r'income\s+tax': 'Income tax benefit',
-            r'provision\s+for\s+income\s+taxes?': 'Income tax benefit',
-            r'net\s+(?:profit|income|earnings|loss)': 'Net profit (loss)',
-            r'earnings?\s+before\s+(?:income\s+)?taxes?': 'Net profit (loss)',
-            r'ebt': 'Net profit (loss)'
+            r'revenue(?:s)?': 'Revenue',
+            r'cost\s+of\s+(?:goods\s+)?sales?': 'Cost of Sales',
+            r'gross\s+profit': 'Gross Profit',
+            r'operating\s+expenses?': 'Operating Expenses',
+            r'operating\s+income': 'Operating Income',
+            r'interest\s+expense': 'Interest Expense',
+            r'income\s+tax(?:es)?': 'Income Tax Expense',
+            r'net\s+income': 'Net Income'
         }
         
         for pattern, template_item in is_rules.items():
@@ -1769,25 +1265,19 @@ class TemplateMatcher:
         return None, 0.0
 
     def apply_rule_based_mapping_cfs(self, description: str) -> tuple[str, float]:
-        """Apply rule-based mapping for CFS items"""
+        """Apply rule-based mapping for cash flow statement items"""
         import re
         desc_lower = description.lower()
         
-        # CFS-specific rule-based mapping
+        # Cash flow statement rule-based mapping
         cfs_rules = {
-            r'net profit': 'Net profit (loss)',
-            r'net income': 'Net profit (loss)',
+            r'net\s+income': 'Net Income',
             r'depreciation': 'Depreciation',
-            r'deferred.*tax': 'Deferred income taxes',
-            r'impairment': 'Impairment and other losses',
-            r'changes.*operating': 'Changes in operating assets and liabilities',
-            r'net cash.*operating': 'Net cash provided by (used in) operating activities',
-            r'purchases.*equipment': 'Purchases of property and equipment',
-            r'proceeds.*sale': 'Proceeds from sale of assets',
-            r'net cash.*investing': 'Net cash used in investing activities',
-            r'proceeds.*issuance': 'Proceeds from issuance',
-            r'principal payments': 'Principal payments',
-            r'net cash.*financing': 'Net cash provided by (used in) financing activities'
+            r'amortization': 'Amortization',
+            r'capital\s+expenditures?': 'Capital Expenditures',
+            r'dividends?': 'Dividends',
+            r'proceeds?\s+from\s+debt': 'Proceeds from Debt',
+            r'repayment\s+of\s+debt': 'Repayment of Debt'
         }
         
         for pattern, template_item in cfs_rules.items():
@@ -1796,31 +1286,75 @@ class TemplateMatcher:
         
         return None, 0.0
 
-    def get_semantic_match_is(self, description: str, template_items: list, section: str) -> tuple[str, float]:
-        """Get semantic match for IS items"""
-        best_match = None
-        best_score = 0.0
+    def get_semantic_match(self, description: str, template_items: list, section_context: str) -> tuple[str, float]:
+        """Get semantic match using sentence transformers"""
+        if not template_items:
+            return None, 0.0
         
-        for template_item in template_items:
-            score = self.get_similarity(description, template_item)
-            if score > best_score:
-                best_score = score
-                best_match = template_item
-        
-        return best_match, best_score
+        try:
+            # Get embeddings
+            desc_embedding = self.model.encode([description])
+            template_embeddings = self.model.encode(template_items)
+            
+            # Calculate similarities
+            similarities = cosine_similarity(desc_embedding, template_embeddings)[0]
+            
+            # Find best match
+            best_idx = np.argmax(similarities)
+            best_score = similarities[best_idx]
+            
+            if best_score > 0.3:  # Lower threshold for semantic matching
+                return template_items[best_idx], best_score
+            
+            return None, 0.0
+            
+        except Exception as e:
+            print(f"Error in semantic matching: {e}")
+            return None, 0.0
 
-    def get_semantic_match_cfs(self, description: str, template_items: list, section: str) -> tuple[str, float]:
-        """Get semantic match for CFS items"""
-        best_match = None
-        best_score = 0.0
+    def hybrid_map_item(self, description: str, template_items: List[str], 
+                       section_context: str, statement_type: str) -> Tuple[Optional[str], float, str]:
+        """
+        Hybrid mapping approach: rule-based first, then LLM for low confidence.
+        Returns (template_item, confidence_score, method_used)
+        """
+        # Step 1: Try rule-based mapping first
+        if statement_type == 'balance_sheet':
+            rule_match, rule_confidence = self.apply_rule_based_mapping(description)
+        elif statement_type == 'income_statement':
+            rule_match, rule_confidence = self.apply_rule_based_mapping_is(description)
+        elif statement_type == 'cash_flow':
+            rule_match, rule_confidence = self.apply_rule_based_mapping_cfs(description)
+        else:
+            rule_match, rule_confidence = None, 0.0
         
-        for template_item in template_items:
-            score = self.get_similarity(description, template_item)
-            if score > best_score:
-                best_score = score
-                best_match = template_item
+        # If rule-based gives high confidence, use it
+        if rule_match and rule_confidence >= 0.7:
+            return rule_match, rule_confidence, "rule_based"
         
-        return best_match, best_score
+        # Step 2: Try semantic matching
+        semantic_match, semantic_score = self.get_semantic_match(description, template_items, section_context)
+        
+        # If semantic gives high confidence, use it
+        if semantic_match and semantic_score >= 0.6:
+            return semantic_match, semantic_score, "semantic"
+        
+        # Step 3: Use LLM as tie-breaker for low confidence cases
+        if self.use_llm and (rule_confidence < 0.5 or semantic_score < 0.5):
+            llm_match, llm_confidence, reasoning = self.llm_mapper.map_with_llm(
+                description, template_items, section_context, statement_type
+            )
+            
+            if llm_match and llm_confidence > 0.4:
+                return llm_match, llm_confidence, f"llm: {reasoning}"
+        
+        # Step 4: Return best available option
+        if rule_match and rule_confidence > semantic_score:
+            return rule_match, rule_confidence, "rule_based_fallback"
+        elif semantic_match:
+            return semantic_match, semantic_score, "semantic_fallback"
+        else:
+            return None, 0.0, "no_match"
 
 def main():
     # Get project root directory
@@ -1839,9 +1373,9 @@ def main():
         print("No output directory found")
         return
         
-    excel_files = list(output_dir.glob("*.xlsx"))
+    excel_files = [f for f in output_dir.glob("*.xlsx") if not f.name.startswith('~$')]
     if not excel_files:
-        print("No Excel files found in output directory")
+        print("No valid (non-temporary) Excel files found in output directory")
         return
         
     # Sort by creation time and get most recent
