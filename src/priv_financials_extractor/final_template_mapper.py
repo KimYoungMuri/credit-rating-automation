@@ -679,7 +679,24 @@ class TemplateMatcher:
                 'section': current_section
             })
         
-        return assigned
+        assigned_lines = self.smooth_section_assignments(assigned)
+        return assigned_lines
+
+    def smooth_section_assignments(self, assigned_lines):
+        """
+        Post-process assigned_lines to correct 'sandwiched' outliers:
+        If a line's neighbors (i-1, i+1) have the same section and it is different, reassign it and log.
+        """
+        for i in range(1, len(assigned_lines) - 1):
+            prev_section = assigned_lines[i-1].get('section')
+            next_section = assigned_lines[i+1].get('section')
+            curr_section = assigned_lines[i].get('section')
+            if prev_section == next_section and curr_section != prev_section:
+                old_section = assigned_lines[i]['section']
+                assigned_lines[i]['section'] = prev_section
+                desc = assigned_lines[i].get('description', '')
+                print(f"[SMOOTH] Corrected section for line {i}: '{desc}' from '{old_section}' to '{prev_section}'")
+        return assigned_lines
 
     def filter_out_totals_for_llm(self, bs_lines: List[dict]) -> Tuple[List[dict], List[dict]]:
         """
@@ -785,6 +802,7 @@ class TemplateMatcher:
             
             print(f"[SECTION ASSIGN] '{desc}' -> {section} [source: {source}]")
 
+        assigned_lines = self.smooth_section_assignments(assigned_lines)
         return assigned_lines
 
     def assign_sections_by_context_is(self, extracted_lines: list) -> list:
@@ -830,7 +848,8 @@ class TemplateMatcher:
                 'section': assigned_section
             })
         
-        return assigned
+        assigned_lines = self.smooth_section_assignments(assigned)
+        return assigned_lines
 
     def assign_sections_by_context_cfs(self, extracted_lines: list) -> list:
         """
@@ -901,7 +920,8 @@ class TemplateMatcher:
                  ]
              }
         
-        return assigned
+        assigned_lines = self.smooth_section_assignments(assigned)
+        return assigned_lines
 
     def get_is_row_map(self, worksheet, section: str) -> dict:
         """
@@ -959,7 +979,10 @@ class TemplateMatcher:
             'Principal payments': 38,
             'Net cash provided by (used in) financing activities': 39,
             'Other Financing Activities': 40,
-            'Other': 42
+            'Net change in Cash': 42,
+            'Starting Cash': 43,
+            'Ending Cash': 44,
+            'Other': 45
         }
         
         return {item: cfs_row_mapping.get(item) for item in template_items if item in cfs_row_mapping}
@@ -1047,6 +1070,9 @@ class TemplateMatcher:
             r'prepaid\s+expenses?': 'Prepaid Expenses',
             r'inventor(?:y|ies)(?:[—-]net)?': 'Inventory',
             r'property\s+(?:and\s+)?equipment(?:[—-]net)?': 'Net PPE',
+            r'property\s+(?:and\s+)?equipment\s+at\s+cost': 'Net PPE',  # Added
+            r'less\s+accumulated\s+depreciation': 'Net PPE',  # Added
+            r'accumulated\s+depreciation': 'Net PPE',  # Added
             r'net\s+ppe': 'Net PPE',
             r'goodwill(?:[—-]net)?': 'Goodwill',
             r'(?:other\s+)?intangible\s+assets?(?:[—-]net)?': 'Intangibles',
@@ -1109,16 +1135,36 @@ class TemplateMatcher:
         """Apply rule-based mapping for cash flow statement items"""
         import re
         desc_lower = description.lower()
-        
-        # Cash flow statement rule-based mapping
+            
+        # Cash flow statement rule-based mapping - EXPANDED
         cfs_rules = {
-            r'net\s+income': 'Net Income',
+            r'net\s+(?:income|profit|loss)': 'Net profit (loss)',
             r'depreciation': 'Depreciation',
-            r'amortization': 'Amortization',
-            r'capital\s+expenditures?': 'Capital Expenditures',
-            r'dividends?': 'Dividends',
-            r'proceeds?\s+from\s+debt': 'Proceeds from Debt',
-            r'repayment\s+of\s+debt': 'Repayment of Debt'
+            r'amortization': 'Depreciation',  # Map to same field
+            r'deferred\s+income\s+taxes?': 'Deferred income taxes',
+            r'impairment\s+and\s+other\s+losses?': 'Impairment and other losses',
+            r'changes?\s+in\s+operating\s+assets?\s+and\s+liabilities?': 'Changes in operating assets and liabilities',
+            r'net\s+cash\s+provided\s+by\s+\(used\s+in\)\s+operating\s+activities?': 'Net cash provided by (used in) operating activities',
+            r'purchases?\s+of\s+property\s+and\s+equipment': 'Purchases of property and equipment',
+            r'proceeds?\s+from\s+sale\s+of\s+assets?': 'Proceeds from sale of assets',
+            r'net\s+cash\s+used\s+in\s+investing\s+activities?': 'Net cash used in investing activities',
+            r'proceeds?\s+from\s+issuance': 'Proceeds from issuance',
+            r'principal\s+payments?': 'Principal payments',
+            r'net\s+cash\s+provided\s+by\s+\(used\s+in\)\s+financing\s+activities?': 'Net cash provided by (used in) financing activities',
+            # Additional patterns for common items
+            r'\(increase\)\s+decrease\s+in\s+inventories?': 'Changes in operating assets and liabilities',
+            r'\(increase\)\s+decrease\s+in\s+prepaid\s+expenses?': 'Changes in operating assets and liabilities',
+            r'\(increase\)\s+decrease\s+in\s+receivables?': 'Changes in operating assets and liabilities',
+            r'\(increase\)\s+decrease\s+in\s+accounts?\s+payable': 'Changes in operating assets and liabilities',
+            r'accrued\s+liabilities?\s+and\s+taxes?': 'Changes in operating assets and liabilities',
+            r'dividends?\s+paid': 'Other Financing Activities',
+            r'purchase\s+of\s+marketable\s+securities?': 'Other Investing Activities',
+            r'proceeds?\s+from\s+marketable\s+securities?': 'Other Investing Activities',
+            # Cash reconciliation items
+            r'cash\s+and\s+cash\s+equivalents?\s+at\s+beginning\s+of\s+year': 'Starting Cash',
+            r'cash\s+and\s+cash\s+equivalents?\s+at\s+end\s+of\s+year': 'Ending Cash',
+            r'net\s+(?:change|increase|decrease)\s+in\s+cash': 'Net change in Cash',
+            r'net\s+(?:change|increase|decrease)\s+in\s+cash\s+and\s+cash\s+equivalents?': 'Net change in Cash'
         }
         
         for pattern, template_item in cfs_rules.items():
@@ -1242,7 +1288,7 @@ class TemplateMatcher:
             if not row_map:
                 print(f"Warning: No row map found for section '{section}'")
                 continue
-            
+                
             template_items = list(row_map.keys())
             print(f"[DEBUG] Template items for {section}: {template_items}")
             
@@ -1265,14 +1311,14 @@ class TemplateMatcher:
                     print(f"  [MAP-DECOUPLED] '{desc}' -> {template_item} (confidence: {confidence:.2f}, method: {method})")
                     # Write to template (implementation depends on your existing logic)
                     # ... (continue with existing mapping logic)
-                else:
                     print(f"  [MAP-OTHER] '{desc}' -> Other (no match found)")
                     # Add to "Other" category
                     # ... (continue with existing logic)
         
         # Save and return
-        workbook.save(template_path)
-        return template_path
+        else:
+            workbook.save(template_path)
+            return template_path
 
     def get_section_row_range(self, section: str) -> Tuple[int, int]:
         """Get the row range for a given section."""
@@ -1373,6 +1419,7 @@ class TemplateMatcher:
             row_maps = {
                 'current_assets': self.get_bs_row_map(bs_sheet, 7, 13),           # Includes 'Other' at 12, Total at 13
                 'noncurrent_assets': self.get_bs_row_map(bs_sheet, 16, 19),      # Includes 'Other' at 18, Total at 19
+                'non_current_assets': self.get_bs_row_map(bs_sheet, 16, 19),     # Alternative naming
                 'current_liabilities': self.get_bs_row_map(bs_sheet, 24, 29),    # Includes 'Other' at 28, Total at 29
                 'noncurrent_liabilities': self.get_bs_row_map(bs_sheet, 31, 34), # Includes 'Other' at 33, Total at 34
                 'equity': self.get_bs_row_map(bs_sheet, 38, 43)                  # Includes 'Other' at 42, Total at 43
@@ -1410,6 +1457,26 @@ class TemplateMatcher:
             # Assign sections to all items (once, using the first available year for values)
             bs_lines = [{'description': d, 'numbers': [next(iter(v.values()))]} for d, v in item_year_values.items()]
             assigned_bs_lines = self.assign_sections_with_llm(bs_lines)
+            
+            # Post-process section assignments to fix common misassignments
+            for item in assigned_bs_lines:
+                desc = item['description'].lower()
+                if 'accumulated depreciation' in desc or 'less accumulated depreciation' in desc:
+                    if item.get('section') != 'noncurrent_assets':
+                        print(f"[SECTION FIX] Correcting 'accumulated depreciation' from '{item.get('section')}' to 'noncurrent_assets'")
+                        item['section'] = 'noncurrent_assets'
+                elif 'property' in desc and ('equipment' in desc or 'plant' in desc):
+                    if item.get('section') != 'noncurrent_assets':
+                        print(f"[SECTION FIX] Correcting 'property/equipment' from '{item.get('section')}' to 'noncurrent_assets'")
+                        item['section'] = 'noncurrent_assets'
+                elif 'taxes and other receivables' in desc:
+                    if item.get('section') != 'current_assets':
+                        print(f"[SECTION FIX] Correcting 'taxes and other receivables' from '{item.get('section')}' to 'current_assets'")
+                        item['section'] = 'current_assets'
+            
+            self.print_section_assignments(assigned_bs_lines, ','.join(years), 'balance_sheet')
+
+            # Track used items to prevent double counting
             self.print_section_assignments(assigned_bs_lines, ','.join(years), 'balance_sheet')
 
             # Track used items to prevent double counting
@@ -1509,8 +1576,8 @@ class TemplateMatcher:
                     for year, targets in year_target_counts.items():
                         if len(targets) > 1:
                             print(f"[WARNING] Double-counted item: '{desc}' mapped to multiple template rows {targets} for year {year}")
-
-                # Write accumulated values to template
+                    
+                    # Write accumulated values to template
                 for key, total_val in section_accumulated.items():
                     if total_val != 0:
                         target_item, year = key.rsplit('_', 1)
@@ -1607,7 +1674,7 @@ class TemplateMatcher:
                 if mapped_year not in year_cols:
                     print(f"[DEBUG] Skipping IS year {extracted_year} -> {mapped_year} - not in template")
                     continue
-                    
+                        
                 col = year_cols[mapped_year]
                 year_data = is_data[extracted_year]
                 print(f"[DEBUG] IS year {extracted_year} -> {mapped_year} data: {type(year_data)}, length: {len(year_data) if isinstance(year_data, dict) else 'N/A'}")
@@ -1615,7 +1682,7 @@ class TemplateMatcher:
                 if not isinstance(year_data, dict):
                     print(f"[WARN] IS year {extracted_year} data is not a dict, skipping")
                     continue
-                
+                        
                 print(f"\n[DEBUG] Processing IS for year {extracted_year} -> {mapped_year}:")
                 for desc, val in year_data.items():
                     print(f"[DEBUG] IS item: '{desc}' -> {val} (type: {type(val)})")
@@ -1661,18 +1728,20 @@ class TemplateMatcher:
                                 print(f"  [MAP-IS] '{desc}' -> {section}::{target_item} ({val_float}) [method: {method}]")
                                 mapped = True
                                 break
-                            else:
+                        else:
                                 print(f"  [WARN] Template item '{target_item}' not found in row map. Available items: {list(row_map.keys())}")
                                 # Try to find a similar item
-                                for available_item in row_map.keys():
-                                    if self.get_similarity(target_item.lower(), available_item.lower()) > 0.7:
-                                        row_idx = row_map[available_item]
-                                        is_cf_sheet[f"{col}{row_idx}"] = val_float
-                                        print(f"  [MAP-IS-SIMILAR] '{desc}' -> {section}::{available_item} ({val_float}) [method: {method}]")
-                                        mapped = True
+                                if target_item is not None:
+                                    for available_item in row_map.keys():
+                                        if self.get_similarity(target_item.lower(), available_item.lower()) > 0.7:
+                                            row_idx = row_map[available_item]
+                                            is_cf_sheet[f"{col}{row_idx}"] = val_float
+                                            print(f"  [MAP-IS-SIMILAR] '{desc}' -> {section}::{available_item} ({val_float}) [method: {method}]")
+                                            mapped = True
+                                            break
+                                    if mapped:
                                         break
-                                if mapped:
-                                    break
+                                # If target_item is None, skip similarity check and mapping
                     
                     if not mapped:
                         # Add to "Other" for the most appropriate section
@@ -1698,9 +1767,10 @@ class TemplateMatcher:
             
             # Get CFS row maps
             cf_row_maps = {
-                'operating_activities': self.get_cfs_row_map(['Net Income', 'Depreciation', 'Changes in Working Capital', 'Other Operating'], 'operating_activities'),
-                'investing_activities': self.get_cfs_row_map(['Capital Expenditures', 'Acquisitions', 'Investments', 'Other Investing'], 'investing_activities'),
-                'financing_activities': self.get_cfs_row_map(['Debt Issuance', 'Debt Repayment', 'Dividends', 'Other Financing'], 'financing_activities')
+                'operating_activities': self.get_cfs_row_map(['Net profit (loss)', 'Depreciation', 'Changes in operating assets and liabilities', 'Other Operating Activities'], 'operating_activities'),
+                'investing_activities': self.get_cfs_row_map(['Purchases of property and equipment', 'Proceeds from sale of assets', 'Other Investing Activities'], 'investing_activities'),
+                'financing_activities': self.get_cfs_row_map(['Proceeds from issuance', 'Principal payments', 'Other Financing Activities'], 'financing_activities'),
+                'cash_reconciliation': self.get_cfs_row_map(['Net change in Cash', 'Starting Cash', 'Ending Cash'], 'cash_reconciliation')
             }
             
             # Process each year
@@ -1770,15 +1840,17 @@ class TemplateMatcher:
                             else:
                                 print(f"  [WARN] Template item '{target_item}' not found in row map. Available items: {list(row_map.keys())}")
                                 # Try to find a similar item
-                                for available_item in row_map.keys():
-                                    if self.get_similarity(target_item.lower(), available_item.lower()) > 0.7:
-                                        row_idx = row_map[available_item]
-                                        is_cf_sheet[f"{col}{row_idx}"] = val_float
-                                        print(f"  [MAP-CFS-SIMILAR] '{desc}' -> {section}::{available_item} ({val_float}) [method: {method}]")
-                                        mapped = True
+                                if target_item is not None:
+                                    for available_item in row_map.keys():
+                                        if self.get_similarity(target_item.lower(), available_item.lower()) > 0.7:
+                                            row_idx = row_map[available_item]
+                                            is_cf_sheet[f"{col}{row_idx}"] = val_float
+                                            print(f"  [MAP-CFS-SIMILAR] '{desc}' -> {section}::{available_item} ({val_float}) [method: {method}]")
+                                            mapped = True
+                                            break
+                                    if mapped:
                                         break
-                                if mapped:
-                                    break
+                                # If target_item is None, skip similarity check and mapping
                     
                     if not mapped:
                         # Add to "Other" for the most appropriate section
