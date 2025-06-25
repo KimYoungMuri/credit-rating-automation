@@ -13,7 +13,7 @@ class LLMMapper:
     
     def __init__(self, ollama_url: str = "http://localhost:11434"):
         self.ollama_url = ollama_url
-        self.model_name = "mistral"
+        self.model_name = "mistral:latest"
         self.setup_logging()
         
     def setup_logging(self):
@@ -37,7 +37,7 @@ class LLMMapper:
             self.logger.warning(f"Ollama not available: {e}")
             return False
     
-    def call_ollama(self, prompt: str, timeout: int = 15) -> Optional[str]:
+    def call_ollama(self, prompt: str, timeout: int = 60) -> Optional[str]:
         """
         Call Ollama API with the given prompt.
         Returns the generated response or None if failed.
@@ -53,13 +53,14 @@ class LLMMapper:
                     "max_tokens": 256  # Reduced from 512 to speed up
                 }
             }
-            
+            print(f"[DEBUG] Sending prompt to Ollama (length: {len(prompt)}): {prompt[:200]}...")
             response = requests.post(
                 f"{self.ollama_url}/api/generate",
                 json=payload,
-                timeout=timeout  # Reduced from 30 to 15 seconds
+                timeout=timeout  # Increased from 15 to 60 seconds
             )
-            
+            print(f"[DEBUG] Ollama response status: {response.status_code}")
+            print(f"[DEBUG] Ollama response: {response.text[:500]}")
             if response.status_code == 200:
                 result = response.json()
                 return result.get("response", "").strip()
@@ -81,84 +82,68 @@ class LLMMapper:
         """
         prompt = f"""You are a financial statement mapping expert. Your task is to map a financial line item to the most appropriate template item.
 
-STATEMENT TYPE: {statement_type.upper()}
-SECTION: {section_context.upper()}
+        STATEMENT TYPE: {statement_type.upper()}
+        SECTION: {section_context.upper()}
 
-FINANCIAL LINE ITEM TO MAP: "{description}"
+        FINANCIAL LINE ITEM TO MAP: "{description}"
 
-AVAILABLE TEMPLATE ITEMS:
-{chr(10).join(f"- {item}" for item in template_items)}
+        AVAILABLE TEMPLATE ITEMS:
+        {chr(10).join(f"- {item}" for item in template_items)}
 
-INSTRUCTIONS:
-1. Analyze the financial line item and find the best match from the template items
-2. Consider synonyms, abbreviations, and common variations
-3. Pay attention to the section context (e.g., assets vs liabilities)
-4. If no good match exists, return "Other"
-5. Provide a confidence score from 0.0 to 1.0
+        INSTRUCTIONS:
+        1. Analyze the financial line item and find the best match from the template items.
+        2. Consider synonyms, abbreviations, and common variations.
+        3. Pay attention to the section context (e.g., assets vs liabilities).
+        4. If no good match exists, return "Other".
+        5. Provide a confidence score from 0.0 to 1.0.
 
-RESPONSE FORMAT (exact format required):
-[template_item_name, confidence_score, reasoning]
+        IMPORTANT: Your response must be in the format [template_item_name, confidence_score, reasoning] and must start and end with square brackets. Do not include any text before or after the brackets.
 
-Examples:
-- "Accounts Receivable" → "Accounts Receivable" (high confidence)
-- "Trade Receivables" → "Accounts Receivable" (high confidence) 
-- "Net Receivables" → "Accounts Receivable" (medium confidence)
-- "Unusual Item" → "Other" (low confidence)
+        RESPONSE FORMAT (exact format required):
+        [template_item_name, confidence_score, reasoning]
 
-Your response:"""
+        Examples:
+        ["Accounts Receivable", 1.0, "Direct match"]
+        ["Other", 0.2, "No good match"]
+
+        Your response: """
 
         return prompt
     
     def parse_llm_response(self, response: str) -> Tuple[Optional[str], float, str]:
-        """
-        Parse the LLM response to extract template item, confidence, and reasoning.
-        Returns (template_item, confidence_score, reasoning)
-        """
+        """ Parse the LLM response to extract template item, confidence, and reasoning.
+        Returns (template_item, confidence_score, reasoning) """
+        import ast
+        import re
         try:
-            # Clean up the response
             response = response.strip()
-            
-            # Look for the expected format: [item, confidence, reasoning]
+            # Try to parse as a Python list (handles both [..] and ["..", .., ".."])
             if response.startswith('[') and response.endswith(']'):
-                # Extract content between brackets
-                content = response[1:-1].strip()
-                
-                # Split by commas, but be careful with commas in the reasoning
-                parts = content.split(',')
-                if len(parts) >= 2:
-                    template_item = parts[0].strip().strip('"\'')
-                    confidence_str = parts[1].strip()
-                    
-                    # Extract confidence score
-                    try:
-                        confidence = float(confidence_str)
-                        confidence = max(0.0, min(1.0, confidence))  # Clamp between 0 and 1
-                    except ValueError:
-                        confidence = 0.5  # Default confidence if parsing fails
-                    
-                    # Extract reasoning (everything after the second comma)
-                    reasoning = ','.join(parts[2:]).strip().strip('"\'') if len(parts) > 2 else "No reasoning provided"
-                    
-                    return template_item, confidence, reasoning
-            
-            # Fallback parsing for different response formats
-            lines = response.split('\n')
-            for line in lines:
-                line = line.strip()
-                if '→' in line or '->' in line:
-                    # Extract template item from arrow notation
-                    parts = line.replace('→', '->').split('->')
-                    if len(parts) >= 2:
-                        template_item = parts[1].strip().strip('"\'')
-                        return template_item, 0.7, "Parsed from arrow notation"
-            
-            # If all else fails, look for template items in the response
-            for item in ["Other", "Cash and equivalents", "Accounts Receivable", "Inventory"]:
+                try:
+                    parsed = ast.literal_eval(response)
+                    if isinstance(parsed, list) and len(parsed) >= 2:
+                        template_item = str(parsed[0]).strip()
+                        confidence = float(parsed[1])
+                        reasoning = str(parsed[2]) if len(parsed) > 2 else ""
+                        return template_item, confidence, reasoning
+                except Exception:
+                    pass
+
+            # Regex fallback: look for "Item", number, "reasoning"
+            regex = r'\"?([A-Za-z0-9 ,&\\-]+)\"?[,\\s]+([01](?:\\.\\d+)?)\\s*,?\\s*([^\"]*)'
+            match = re.search(regex, response)
+            if match:
+                template_item = match.group(1).strip()
+                confidence = float(match.group(2))
+                reasoning = match.group(3).strip()
+                return template_item, confidence, reasoning
+
+            # Fallback: look for known template items in the response
+            for item in ["Other", "Cash and equivalents", "Accounts Receivable", "Inventory", "Net PPE"]:
                 if item.lower() in response.lower():
                     return item, 0.5, "Found in response text"
-            
+
             return None, 0.0, "Could not parse response"
-            
         except Exception as e:
             self.logger.error(f"Error parsing LLM response: {e}")
             return None, 0.0, f"Parsing error: {e}"

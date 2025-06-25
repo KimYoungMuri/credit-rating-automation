@@ -307,39 +307,33 @@ class TextExtractor:
         # Create Excel writer
         with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
             for stmt_type, lines in data.items():
-                if not lines:  # Skip empty statements
-                    print(f"\nSkipping empty statement: {stmt_type}")
+                print(f"\n[DEBUG] Processing statement: {stmt_type}")
+                print(f"[DEBUG] lines type: {type(lines)}")
+                print(f"[DEBUG] lines content: {lines}")
+                if not lines or not isinstance(lines, list) or not all(isinstance(line, dict) for line in lines):
+                    print(f"[WARNING] Skipping statement: {stmt_type} (empty or invalid format)")
                     continue
-                
-                # Convert to DataFrame
-                max_numbers = max(len(line['numbers']) for line in lines)
+                # Collect all years present in any line
+                all_years = set()
+                for line in lines:
+                    all_years.update(line['numbers'].keys())
+                all_years = sorted(all_years)
                 df_data = {
                     'Description': [line['description'] for line in lines]
                 }
-                
-                # Add number columns
-                for i in range(max_numbers):
-                    col_name = f'Value_{i+1}'
-                    df_data[col_name] = [
-                        line['numbers'][i] if i < len(line['numbers']) and line['numbers'][i] is not None else None
-                        for line in lines
-                    ]
-                
+                for year in all_years:
+                    df_data[year] = [line['numbers'].get(year, None) for line in lines]
                 df = pd.DataFrame(df_data)
-                
                 print(f"\nWriting sheet: {stmt_type}")
                 print(f"DataFrame shape: {df.shape}")
                 print("DataFrame head:")
                 print(df.head())
-                
                 # Write to Excel with formatting
                 sheet_name = stmt_type.replace('_', ' ').title()
                 print(f"Sheet name: {sheet_name}")
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
-                
                 # Get the worksheet
                 worksheet = writer.sheets[sheet_name]
-                
                 # Format columns
                 for idx, col in enumerate(df.columns):
                     column_letter = chr(65 + idx)
@@ -348,12 +342,10 @@ class TextExtractor:
                         worksheet.column_dimensions[column_letter].width = 60  # Width for description
                     else:
                         worksheet.column_dimensions[column_letter].width = 15  # Width for numbers
-                
                 # Format header
                 from openpyxl.styles import Font, PatternFill
                 header_font = Font(bold=True)
                 header_fill = PatternFill(start_color='CCCCCC', end_color='CCCCCC', fill_type='solid')
-                
                 for cell in worksheet[1]:
                     cell.font = header_font
                     cell.fill = header_fill
@@ -375,7 +367,7 @@ class TextExtractor:
             
             with pdfplumber.open(pdf_path) as pdf:
                 # This will hold the final data in the format the mapper expects
-                final_extracted_data = defaultdict(lambda: defaultdict(dict))
+                final_extracted_data = {}
 
                 for stmt_type, page_nums in statement_pages.items():
                     all_processed_lines = []
@@ -417,20 +409,17 @@ class TextExtractor:
                         processed_lines = self.process_numbers(filtered_lines, number_columns_coords, labeled_columns)
                         all_processed_lines.extend(processed_lines)
 
-                    # Convert the processed lines into the mapper-friendly format
-                    for line in all_processed_lines:
-                        desc = line['description']
-                        for year, value in line['numbers'].items():
-                            if value is not None:
-                                final_extracted_data[stmt_type][year][desc] = value
-                    
+                    # Store the processed lines in order for this statement type
+                    final_extracted_data[stmt_type] = all_processed_lines
                     # (Optional) Print the extracted table for debugging
                     if all_processed_lines:
-                        # This part would need to be updated to handle the new dict structure
                         pass 
 
-                # Return the structured data directly, no intermediate Excel file
-                return None, final_extracted_data
+                if final_extracted_data:
+                    excel_path = self.export_to_excel(final_extracted_data, Path(pdf_path).stem)
+                    return excel_path, final_extracted_data
+                else:
+                    return None, None
 
         except Exception as e:
             print(f"Error extracting text: {str(e)}")

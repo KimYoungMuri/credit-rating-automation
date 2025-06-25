@@ -270,8 +270,6 @@ class TemplateMatcher:
         else:
             if not use_llm_fallback:
                 print("⚡ LLM disabled - using fast rule-based approach only")
-            else:
-                print("⚠️  LLM mapper not available - using rule-based approach only")
                 print("   Install Ollama: https://ollama.ai/")
                 print("   Run: ollama pull mistral")
         
@@ -1481,7 +1479,7 @@ class TemplateMatcher:
 
             # Track used items to prevent double counting
             used_items = set()
-            
+
             # Group items by their assigned section
             section_data = defaultdict(list)
             for idx, item in enumerate(assigned_bs_lines):
@@ -1544,16 +1542,16 @@ class TemplateMatcher:
                                 item_to_template[desc].append((target_item, year, val_float))
                                 template_to_items[(target_item, year)].append((desc, val_float))
                                 self.log_mapping_decision(desc, year, section, target_item, val_float, method, "ACCUMULATE HYBRID")
-                    else:
-                        for year, val in year_vals.items():
-                            if str(year) in year_cols:
-                                try:
-                                    val_float = float(re.sub(r'[^\d\.-]', '', str(val)))
-                                except (ValueError, TypeError):
-                                    continue
-                                section_other_sum[year] += val_float
-                                other_items[year].append((desc, val_float))
-                                self.log_mapping_decision(desc, year, section, 'Other', val_float, method, "ACCUMULATE OTHER")
+                            else:
+                                for year, val in year_vals.items():
+                                    if str(year) in year_cols:
+                                        try:
+                                            val_float = float(re.sub(r'[^\d\.-]', '', str(val)))
+                                        except (ValueError, TypeError):
+                                            continue
+                                        section_other_sum[year] += val_float
+                                        other_items[year].append((desc, val_float))
+                                        self.log_mapping_decision(desc, year, section, 'Other', val_float, method, "ACCUMULATE OTHER")
                         used_items.add(desc)
 
                 # --- Print mapping summary for this section ---
@@ -1576,8 +1574,8 @@ class TemplateMatcher:
                     for year, targets in year_target_counts.items():
                         if len(targets) > 1:
                             print(f"[WARNING] Double-counted item: '{desc}' mapped to multiple template rows {targets} for year {year}")
-                    
-                    # Write accumulated values to template
+
+                # Write accumulated values to template
                 for key, total_val in section_accumulated.items():
                     if total_val != 0:
                         target_item, year = key.rsplit('_', 1)
@@ -1669,7 +1667,7 @@ class TemplateMatcher:
                 if extracted_year not in year_mapping:
                     print(f"[DEBUG] Skipping IS year {extracted_year} - not in year mapping")
                     continue
-                    
+                
                 mapped_year = year_mapping[extracted_year]
                 if mapped_year not in year_cols:
                     print(f"[DEBUG] Skipping IS year {extracted_year} -> {mapped_year} - not in template")
@@ -1709,7 +1707,7 @@ class TemplateMatcher:
                     if self.is_total_or_net_row(desc):
                         print(f"  [SKIP TOTAL] '{desc}' is a total/subtotal row.")
                         continue
-                    
+                        
                     # Try to map to IS sections
                     mapped = False
                     for section, row_map in is_row_maps.items():
@@ -1728,7 +1726,7 @@ class TemplateMatcher:
                                 print(f"  [MAP-IS] '{desc}' -> {section}::{target_item} ({val_float}) [method: {method}]")
                                 mapped = True
                                 break
-                        else:
+                            else:
                                 print(f"  [WARN] Template item '{target_item}' not found in row map. Available items: {list(row_map.keys())}")
                                 # Try to find a similar item
                                 if target_item is not None:
@@ -1778,7 +1776,7 @@ class TemplateMatcher:
                 if extracted_year not in year_mapping:
                     print(f"[DEBUG] Skipping CFS year {extracted_year} - not in year mapping")
                     continue
-                    
+                
                 mapped_year = year_mapping[extracted_year]
                 if mapped_year not in year_cols:
                     print(f"[DEBUG] Skipping CFS year {extracted_year} -> {mapped_year} - not in template")
@@ -1818,7 +1816,7 @@ class TemplateMatcher:
                     if self.is_total_or_net_row(desc):
                         print(f"  [SKIP TOTAL] '{desc}' is a total/subtotal row.")
                         continue
-                    
+                        
                     # Try to map to CFS sections
                     mapped = False
                     for section, row_map in cf_row_maps.items():
@@ -1896,7 +1894,7 @@ class TemplateMatcher:
             if cell_val:
                 row_map[cell_val] = row
         return row_map
-
+    
     def log_mapping_decision(self, desc, year, section, target_item, value, method, action, double_counted=False):
         msg = f"[MAP-{action}] '{desc}' [{year}] -> {section}::{target_item} ({value}) [method: {method}]"
         if double_counted:

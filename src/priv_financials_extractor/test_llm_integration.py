@@ -90,7 +90,7 @@ def test_hybrid_mapper():
     for i, test_case in enumerate(test_cases, 1):
         print(f"\n--- Hybrid Test Case {i}: {test_case['description']} ---")
         
-        result = matcher.hybrid_map_item(
+        result = matcher.hybrid_map_item_decoupled(
             test_case['description'],
             test_case['template_items'],
             test_case['section'],
