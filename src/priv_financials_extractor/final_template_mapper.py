@@ -103,6 +103,8 @@ import openpyxl
 from datetime import datetime
 from llm_mapper import LLMMapper  # Import the LLM mapper
 from sklearn.metrics.pairwise import cosine_similarity
+import sys
+import requests
 
 # Place these at the module level, outside of any function
 IS_SECTION_TEMPLATE = {
@@ -718,6 +720,25 @@ class TemplateMatcher:
         
         return non_total_items, total_items
 
+    def convert_llm_section_to_template_section(self, llm_section: str) -> str:
+        """Convert LLM section names to template section names."""
+        section_mapping = {
+            'Current Assets': 'current_assets',
+            'current_assets': 'current_assets',
+            'Non-Current Assets': 'noncurrent_assets',
+            'noncurrent_assets': 'noncurrent_assets',
+            'Noncurrent Assets': 'noncurrent_assets',
+            'Current Liabilities': 'current_liabilities',
+            'current_liabilities': 'current_liabilities',
+            'Non-Current Liabilities': 'noncurrent_liabilities',
+            'noncurrent_liabilities': 'noncurrent_liabilities',
+            'Noncurrent Liabilities': 'noncurrent_liabilities',
+            'Equity': 'equity',
+            'equity': 'equity',
+            'Uncategorized': None  # Will be handled by fallback logic
+        }
+        return section_mapping.get(llm_section, None)
+
     def assign_sections_with_llm(self, bs_lines: List[dict]) -> List[dict]:
         """
         Assigns BS sections using LLM in batches of 3 (chunked) for all items.
@@ -774,19 +795,30 @@ class TemplateMatcher:
             
             # Try to find exact match in LLM assignments
             if desc in all_assignments:
-                section = all_assignments[desc]
+                llm_section = all_assignments[desc]
+                # Convert LLM section name to template section name
+                section = self.convert_llm_section_to_template_section(llm_section)
                 source = "LLM"
             else:
                 # Try fuzzy matching for minor differences
                 for llm_desc, llm_section in all_assignments.items():
                     if self.get_similarity(desc, llm_desc) > 0.8:
-                        section = llm_section
+                        section = self.convert_llm_section_to_template_section(llm_section)
                         source = f"LLM (fuzzy match: \"{llm_desc}\")"
                         break
                 
                 if section is None:
                     # Fall back to rule-based
-                    section = self.analyze_subsections(desc)
+                    subsection = self.analyze_subsections(desc)
+                    # Map subsection to template section
+                    subsection_map = {
+                        'Current Assets': 'current_assets',
+                        'Non-Current Assets': 'noncurrent_assets',
+                        'Current Liabilities': 'current_liabilities',
+                        'Non-Current Liabilities': 'noncurrent_liabilities',
+                        'Equity': 'equity'
+                    }
+                    section = subsection_map.get(subsection, None)
                     source = "rule-based fallback"
             
             # Create assigned line with proper value handling
@@ -1279,7 +1311,7 @@ class TemplateMatcher:
         
         # Step 3: Map each section using decoupled approach
         for section, items in section_data.items():
-            print(f"\n[DEBUG] Mapping section '{section}' with decoupled approach...")
+            print(f"\n[DEBUG] Mapping section '{section}' with batch approach...")
             
             # Get template items for this section
             row_map = self.get_bs_row_map(bs_sheet, *self.get_section_row_range(section))
@@ -1290,7 +1322,10 @@ class TemplateMatcher:
             template_items = list(row_map.keys())
             print(f"[DEBUG] Template items for {section}: {template_items}")
             
-            # Map each item using decoupled approach
+            # Use batch mapping for efficiency
+            batch_mappings = self.map_section_with_batching(items, template_items, section, 'balance_sheet')
+            
+            # Process batch results
             for item in items:
                 desc = item['description']
                 numbers = item.get('numbers', [])
@@ -1300,15 +1335,22 @@ class TemplateMatcher:
                     print(f"  [SKIP TOTAL] '{desc}' is a total/subtotal row.")
                     continue
                 
-                # Use decoupled mapping (ignores section assignment)
-                template_item, confidence, method = self.hybrid_map_item_decoupled(
-                    desc, template_items, section, 'balance_sheet'
-                )
+                # Get mapping from batch results
+                if desc in batch_mappings:
+                    template_item, confidence, method = batch_mappings[desc]
+                    print(f"  [MAP-BATCH] '{desc}' -> {template_item} (confidence: {confidence:.2f}, method: {method})")
+                else:
+                    # Fall back to individual mapping
+                    template_item, confidence, method = self.hybrid_map_item_decoupled(
+                        desc, template_items, section, 'balance_sheet'
+                    )
+                    print(f"  [MAP-INDIVIDUAL] '{desc}' -> {template_item} (confidence: {confidence:.2f}, method: {method})")
                 
                 if template_item:
-                    print(f"  [MAP-DECOUPLED] '{desc}' -> {template_item} (confidence: {confidence:.2f}, method: {method})")
                     # Write to template (implementation depends on your existing logic)
                     # ... (continue with existing mapping logic)
+                    pass
+                else:
                     print(f"  [MAP-OTHER] '{desc}' -> Other (no match found)")
                     # Add to "Other" category
                     # ... (continue with existing logic)
@@ -1329,7 +1371,26 @@ class TemplateMatcher:
         }
         return ranges.get(section, (1, 1))
 
+    def ensure_dict_of_years_format(self, extracted_data):
+        """Convert list-of-lines format to dict-of-years format if needed."""
+        result = {}
+        for stmt_type, lines in extracted_data.items():
+            if isinstance(lines, list):
+                year_dict = {}
+                for line in lines:
+                    desc = line['description']
+                    for year, value in line['numbers'].items():
+                        if year not in year_dict:
+                            year_dict[year] = {}
+                        year_dict[year][desc] = value
+                result[stmt_type] = year_dict
+            else:
+                result[stmt_type] = lines
+        return result
+
     def map_to_template(self, extracted_data: Dict, template_path: str) -> str:
+        # Convert to dict-of-years format if needed
+        extracted_data = self.ensure_dict_of_years_format(extracted_data)
         # Load the template workbook
         shutil.copy(template_path, "temp_template.xlsx")
         wb = load_workbook("temp_template.xlsx")
@@ -1682,8 +1743,14 @@ class TemplateMatcher:
                     continue
                         
                 print(f"\n[DEBUG] Processing IS for year {extracted_year} -> {mapped_year}:")
+                
+                # Group items by section for batch processing
+                section_items = defaultdict(list)
                 for desc, val in year_data.items():
-                    print(f"[DEBUG] IS item: '{desc}' -> {val} (type: {type(val)})")
+                    # Skip totals
+                    if self.is_total_or_net_row(desc):
+                        print(f"  [SKIP TOTAL] '{desc}' is a total/subtotal row.")
+                        continue
                     
                     # Handle different value types
                     if isinstance(val, list):
@@ -1703,49 +1770,73 @@ class TemplateMatcher:
                         print(f"[WARN] Could not convert IS value to float: {numbers[0]}")
                         continue
                     
-                    # Skip totals
-                    if self.is_total_or_net_row(desc):
-                        print(f"  [SKIP TOTAL] '{desc}' is a total/subtotal row.")
-                        continue
-                        
-                    # Try to map to IS sections
-                    mapped = False
-                    for section, row_map in is_row_maps.items():
-                        if not row_map:
-                            continue
-                        
-                        template_items = list(row_map.keys())
-                        target_item, score, method = self.hybrid_map_item_decoupled(
-                            desc, template_items, section, 'income_statement'
-                        )
-                        
-                        if target_item and score >= 0.4:
-                            if target_item in row_map:
-                                row_idx = row_map[target_item]
-                                is_cf_sheet[f"{col}{row_idx}"] = val_float
-                                print(f"  [MAP-IS] '{desc}' -> {section}::{target_item} ({val_float}) [method: {method}]")
-                                mapped = True
-                                break
-                            else:
-                                print(f"  [WARN] Template item '{target_item}' not found in row map. Available items: {list(row_map.keys())}")
-                                # Try to find a similar item
-                                if target_item is not None:
-                                    for available_item in row_map.keys():
-                                        if self.get_similarity(target_item.lower(), available_item.lower()) > 0.7:
-                                            row_idx = row_map[available_item]
-                                            is_cf_sheet[f"{col}{row_idx}"] = val_float
-                                            print(f"  [MAP-IS-SIMILAR] '{desc}' -> {section}::{available_item} ({val_float}) [method: {method}]")
-                                            mapped = True
-                                            break
-                                    if mapped:
-                                        break
-                                # If target_item is None, skip similarity check and mapping
+                    # Assign section using rule-based approach for grouping
+                    assigned_section = None
+                    desc_lower = desc.lower()
                     
-                    if not mapped:
-                        # Add to "Other" for the most appropriate section
-                        section = self.assign_sections_by_context_is([{'description': desc, 'value': [val_float]}])[0]['section']
-                        if section and section in is_row_maps:
-                            row_map = is_row_maps[section]
+                    # Simple section assignment for grouping
+                    if any(keyword in desc_lower for keyword in ['revenue', 'sales', 'income']):
+                        assigned_section = 'revenue'
+                    elif any(keyword in desc_lower for keyword in ['cost', 'expense', 'depreciation', 'amortization']):
+                        assigned_section = 'operating_expenses'
+                    elif any(keyword in desc_lower for keyword in ['interest']):
+                        assigned_section = 'other_income_expense'
+                    elif any(keyword in desc_lower for keyword in ['tax']):
+                        assigned_section = 'tax_net_income'
+                    else:
+                        assigned_section = 'operating_expenses'  # Default
+                    
+                    section_items[assigned_section].append({
+                        'description': desc,
+                        'value': val_float
+                    })
+                
+                # Process each section with batch mapping
+                for section, items in section_items.items():
+                    if not items:
+                        continue
+                    
+                    row_map = is_row_maps.get(section)
+                    if not row_map:
+                        print(f"[WARN] No row map found for IS section '{section}'")
+                        continue
+                    
+                    template_items = list(row_map.keys())
+                    print(f"\n[DEBUG] Processing IS section '{section}' with batch mapping ({len(items)} items)")
+                    
+                    # Use batch mapping
+                    batch_mappings = self.map_section_with_batching(items, template_items, section, 'income_statement')
+                    
+                    # Process batch results
+                    for item in items:
+                        desc = item['description']
+                        val_float = item['value']
+                        
+                        if desc in batch_mappings:
+                            template_item, confidence, method = batch_mappings[desc]
+                            print(f"  [MAP-BATCH-IS] '{desc}' -> {section}::{template_item} ({val_float}) [method: {method}]")
+                        else:
+                            # Fall back to individual mapping
+                            template_item, confidence, method = self.hybrid_map_item_decoupled(
+                                desc, template_items, section, 'income_statement'
+                            )
+                            print(f"  [MAP-INDIVIDUAL-IS] '{desc}' -> {section}::{template_item} ({val_float}) [method: {method}]")
+                        
+                        if template_item and confidence >= 0.4:
+                            if template_item in row_map:
+                                row_idx = row_map[template_item]
+                                is_cf_sheet[f"{col}{row_idx}"] = val_float
+                            else:
+                                print(f"  [WARN] Template item '{template_item}' not found in row map. Available items: {list(row_map.keys())}")
+                                # Try to find a similar item
+                                for available_item in row_map.keys():
+                                    if self.get_similarity(template_item.lower(), available_item.lower()) > 0.7:
+                                        row_idx = row_map[available_item]
+                                        is_cf_sheet[f"{col}{row_idx}"] = val_float
+                                        print(f"  [MAP-IS-SIMILAR] '{desc}' -> {section}::{available_item} ({val_float}) [method: {method}]")
+                                        break
+                        else:
+                            # Add to "Other" for this section
                             other_row = self.get_other_category_for_is_section(section)
                             if other_row and other_row in row_map:
                                 row_idx = row_map[other_row]
@@ -1791,8 +1882,14 @@ class TemplateMatcher:
                     continue
                 
                 print(f"\n[DEBUG] Processing CFS for year {extracted_year} -> {mapped_year}:")
+                
+                # Group items by section for batch processing
+                section_items = defaultdict(list)
                 for desc, val in year_data.items():
-                    print(f"[DEBUG] CFS item: '{desc}' -> {val} (type: {type(val)})")
+                    # Skip totals
+                    if self.is_total_or_net_row(desc):
+                        print(f"  [SKIP TOTAL] '{desc}' is a total/subtotal row.")
+                        continue
                     
                     # Handle different value types
                     if isinstance(val, list):
@@ -1812,49 +1909,73 @@ class TemplateMatcher:
                         print(f"[WARN] Could not convert CFS value to float: {numbers[0]}")
                         continue
                     
-                    # Skip totals
-                    if self.is_total_or_net_row(desc):
-                        print(f"  [SKIP TOTAL] '{desc}' is a total/subtotal row.")
-                        continue
-                        
-                    # Try to map to CFS sections
-                    mapped = False
-                    for section, row_map in cf_row_maps.items():
-                        if not row_map:
-                            continue
-                        
-                        template_items = list(row_map.keys())
-                        target_item, score, method = self.hybrid_map_item_decoupled(
-                            desc, template_items, section, 'cash_flow'
-                        )
-                        
-                        if target_item and score >= 0.4:
-                            if target_item in row_map:
-                                row_idx = row_map[target_item]
-                                is_cf_sheet[f"{col}{row_idx}"] = val_float
-                                print(f"  [MAP-CFS] '{desc}' -> {section}::{target_item} ({val_float}) [method: {method}]")
-                                mapped = True
-                                break
-                            else:
-                                print(f"  [WARN] Template item '{target_item}' not found in row map. Available items: {list(row_map.keys())}")
-                                # Try to find a similar item
-                                if target_item is not None:
-                                    for available_item in row_map.keys():
-                                        if self.get_similarity(target_item.lower(), available_item.lower()) > 0.7:
-                                            row_idx = row_map[available_item]
-                                            is_cf_sheet[f"{col}{row_idx}"] = val_float
-                                            print(f"  [MAP-CFS-SIMILAR] '{desc}' -> {section}::{available_item} ({val_float}) [method: {method}]")
-                                            mapped = True
-                                            break
-                                    if mapped:
-                                        break
-                                # If target_item is None, skip similarity check and mapping
+                    # Assign section using rule-based approach for grouping
+                    assigned_section = None
+                    desc_lower = desc.lower()
                     
-                    if not mapped:
-                        # Add to "Other" for the most appropriate section
-                        section = self.assign_sections_by_context_cfs([{'description': desc, 'value': [val_float]}])[0]['section']
-                        if section and section in cf_row_maps:
-                            row_map = cf_row_maps[section]
+                    # Simple section assignment for grouping
+                    if any(keyword in desc_lower for keyword in ['operating', 'net income', 'depreciation', 'amortization']):
+                        assigned_section = 'operating_activities'
+                    elif any(keyword in desc_lower for keyword in ['investing', 'purchase', 'proceeds', 'acquisition']):
+                        assigned_section = 'investing_activities'
+                    elif any(keyword in desc_lower for keyword in ['financing', 'debt', 'stock', 'dividend']):
+                        assigned_section = 'financing_activities'
+                    elif any(keyword in desc_lower for keyword in ['cash', 'beginning', 'ending', 'change']):
+                        assigned_section = 'cash_reconciliation'
+                    else:
+                        assigned_section = 'operating_activities'  # Default
+                    
+                    section_items[assigned_section].append({
+                        'description': desc,
+                        'value': val_float
+                    })
+                
+                # Process each section with batch mapping
+                for section, items in section_items.items():
+                    if not items:
+                        continue
+                    
+                    row_map = cf_row_maps.get(section)
+                    if not row_map:
+                        print(f"[WARN] No row map found for CFS section '{section}'")
+                        continue
+                    
+                    template_items = list(row_map.keys())
+                    print(f"\n[DEBUG] Processing CFS section '{section}' with batch mapping ({len(items)} items)")
+                    
+                    # Use batch mapping
+                    batch_mappings = self.map_section_with_batching(items, template_items, section, 'cash_flow')
+                    
+                    # Process batch results
+                    for item in items:
+                        desc = item['description']
+                        val_float = item['value']
+                        
+                        if desc in batch_mappings:
+                            template_item, confidence, method = batch_mappings[desc]
+                            print(f"  [MAP-BATCH-CFS] '{desc}' -> {section}::{template_item} ({val_float}) [method: {method}]")
+                        else:
+                            # Fall back to individual mapping
+                            template_item, confidence, method = self.hybrid_map_item_decoupled(
+                                desc, template_items, section, 'cash_flow'
+                            )
+                            print(f"  [MAP-INDIVIDUAL-CFS] '{desc}' -> {section}::{template_item} ({val_float}) [method: {method}]")
+                        
+                        if template_item and confidence >= 0.4:
+                            if template_item in row_map:
+                                row_idx = row_map[template_item]
+                                is_cf_sheet[f"{col}{row_idx}"] = val_float
+                            else:
+                                print(f"  [WARN] Template item '{template_item}' not found in row map. Available items: {list(row_map.keys())}")
+                                # Try to find a similar item
+                                for available_item in row_map.keys():
+                                    if self.get_similarity(template_item.lower(), available_item.lower()) > 0.7:
+                                        row_idx = row_map[available_item]
+                                        is_cf_sheet[f"{col}{row_idx}"] = val_float
+                                        print(f"  [MAP-CFS-SIMILAR] '{desc}' -> {section}::{available_item} ({val_float}) [method: {method}]")
+                                        break
+                        else:
+                            # Add to "Other" for this section
                             other_row = self.get_other_category_for_cfs_section(section)
                             if other_row and other_row in row_map:
                                 row_idx = row_map[other_row]
@@ -1912,6 +2033,122 @@ class TemplateMatcher:
         print(msg)
         self.extraction_logger.info(msg)
 
+    def batch_map_items_with_llm(self, items: List[dict], template_items: List[str], 
+                                section_context: str, statement_type: str) -> Dict[str, Tuple[str, float, str]]:
+        """
+        Map multiple items to template using LLM in a single batch call.
+        Returns dict mapping item description to (template_item, confidence, method).
+        """
+        if not self.use_llm:
+            return {}
+        
+        # Create batch prompt
+        items_formatted = "\n".join([f'- "{item["description"]}"' for item in items])
+        
+        prompt = f"""You are a financial statement mapping expert. Your task is to map financial line items to the most appropriate template items.
+
+STATEMENT TYPE: {statement_type.upper()}
+SECTION: {section_context.upper()}
+
+FINANCIAL LINE ITEMS TO MAP:
+{items_formatted}
+
+AVAILABLE TEMPLATE ITEMS:
+{chr(10).join(f"- {item}" for item in template_items)}
+
+INSTRUCTIONS:
+1. Analyze each financial line item and find the best match from the template items
+2. Consider synonyms, abbreviations, and common variations
+3. Pay attention to the section context
+4. If no good match exists, return "Other"
+5. Provide a confidence score from 0.0 to 1.0
+
+IMPORTANT: Your response must be a JSON object where keys are the line item descriptions and values are [template_item_name, confidence_score, reasoning].
+
+Example Response Format:
+{{
+  "Cash and cash equivalents": ["Cash and equivalents", 1.0, "Direct match"],
+  "Trade receivables": ["Accounts Receivable", 0.9, "Synonym match"],
+  "Unknown item": ["Other", 0.2, "No good match"]
+}}
+
+Your response:"""
+        
+        try:
+            response = requests.post(
+                f"{self.llm_mapper.ollama_url}/api/generate",
+                json={
+                    "model": self.llm_mapper.model_name,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.1,
+                        "top_p": 0.9,
+                        "max_tokens": 1024
+                    }
+                },
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                response_text = result.get("response", "").strip()
+                
+                # Parse JSON response
+                try:
+                    import json
+                    import re
+                    
+                    # Find JSON object in response
+                    json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+                    if json_match:
+                        json_str = json_match.group(0)
+                        mappings = json.loads(json_str)
+                        
+                        results = {}
+                        for desc, mapping in mappings.items():
+                            if isinstance(mapping, list) and len(mapping) >= 2:
+                                template_item = str(mapping[0]).strip()
+                                confidence = float(mapping[1])
+                                reasoning = str(mapping[2]) if len(mapping) > 2 else ""
+                                results[desc] = (template_item, confidence, f"llm_batch: {reasoning}")
+                        
+                        return results
+                except Exception as e:
+                    print(f"[WARN] Failed to parse LLM batch response: {e}")
+                    return {}
+            
+        except Exception as e:
+            print(f"[WARN] LLM batch call failed: {e}")
+            return {}
+        
+        return {}
+
+    def map_section_with_batching(self, section_data: List[dict], template_items: List[str], 
+                                 section_context: str, statement_type: str) -> Dict[str, Tuple[str, float, str]]:
+        """
+        Map a section of items using batched LLM calls for efficiency.
+        """
+        if not section_data:
+            return {}
+        
+        # Use batch mapping if LLM is available
+        if self.use_llm:
+            batch_results = self.batch_map_items_with_llm(section_data, template_items, section_context, statement_type)
+            if batch_results:
+                return batch_results
+        
+        # Fall back to individual mapping
+        results = {}
+        for item in section_data:
+            desc = item['description']
+            template_item, confidence, method = self.hybrid_map_item_decoupled(
+                desc, template_items, section_context, statement_type
+            )
+            results[desc] = (template_item, confidence, method)
+        
+        return results
+
 def main():
     # Get project root directory
     current_dir = Path(__file__).resolve().parent
@@ -1923,35 +2160,46 @@ def main():
         print(f"Template not found at {template_path}")
         return
         
-    # Get most recent extracted Excel file
+    # Get most recent extracted Excel file or use command-line argument
     output_dir = project_root / "output_excel"
     if not output_dir.exists():
         print("No output directory found")
         return
-        
-    excel_files = [f for f in output_dir.glob("*.xlsx") if not f.name.startswith('~$')]
-    if not excel_files:
-        print("No valid (non-temporary) Excel files found in output directory")
-        return
-        
-    # Sort by creation time and get most recent
-    latest_file = max(excel_files, key=lambda x: x.stat().st_ctime)
+    
+    if len(sys.argv) > 1:
+        latest_file = Path(sys.argv[1])
+        if not latest_file.exists():
+            print(f"Specified file does not exist: {latest_file}")
+            return
+    else:
+        excel_files = [f for f in output_dir.glob("*.xlsx") if not f.name.startswith('~$')]
+        if not excel_files:
+            print("No valid (non-temporary) Excel files found in output directory")
+            return
+        # Sort by creation time and get most recent
+        latest_file = max(excel_files, key=lambda x: x.stat().st_ctime)
     print(f"\nProcessing {latest_file}")
     
     # Read extracted data
     extracted_data = {}
-    for sheet in pd.read_excel(latest_file, sheet_name=None).items():
-        sheet_name, df = sheet
+    for sheet_name, df in pd.read_excel(latest_file, sheet_name=None).items():
         statement_type = sheet_name.lower().replace(' ', '_')
-        extracted_data[statement_type] = {'2024': {}, '2023': {}}
+        extracted_data[statement_type] = {}
         
-        for _, row in df.iterrows():
-            desc = row['Description']
-            if pd.notna(desc):
-                if pd.notna(row.get('Value_1')):
-                    extracted_data[statement_type]['2024'][desc] = row['Value_1']
-                if pd.notna(row.get('Value_2')):
-                    extracted_data[statement_type]['2023'][row['Description']] = row['Value_2']
+        # Find all year columns (exclude 'Description')
+        year_cols = [col for col in df.columns if col != 'Description']
+        print(f"[DEBUG] Found year columns for {statement_type}: {year_cols}")
+        
+        for year in year_cols:
+            extracted_data[statement_type][str(year)] = {}
+            for _, row in df.iterrows():
+                desc = row['Description']
+                if pd.notna(desc) and pd.notna(row.get(year)):
+                    extracted_data[statement_type][str(year)][desc] = row[year]
+        
+        print(f"[DEBUG] Loaded {statement_type}: {len(extracted_data[statement_type])} years")
+        for year, items in extracted_data[statement_type].items():
+            print(f"[DEBUG]   {year}: {len(items)} items")
     
     # Map to template
     matcher = TemplateMatcher()
