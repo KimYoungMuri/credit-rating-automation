@@ -67,7 +67,7 @@ class TextExtractor:
         text = text.replace('$', '').replace(',', '')
         # Handle cases like '1 234' -> '1234'
         text = re.sub(r'(\d)\s+(\d)', r'\1\2', text)
-
+        
         # Handle parenthetical numbers, which can have spaces, e.g., "( 123.45 )" -> "-123.45"
         match = re.match(r'^\(\s*([\d\.]+)\s*\)$', text)
         if match:
@@ -255,7 +255,7 @@ class TextExtractor:
                 continue
 
             if description or any(v is not None for v in number_values.values()):
-                processed_lines.append({
+                    processed_lines.append({
                     'description': description,
                     'numbers': number_values
                 })
@@ -287,6 +287,29 @@ class TextExtractor:
             i += 1
             
         return final_processed_lines
+
+    def merge_multiline_descriptions(self, df):
+        """Merge multi-row descriptions where the value is only on the second row."""
+        merged_rows = []
+        prev_desc = None
+        prev_row = None
+        value_cols = [col for col in df.columns if col != 'Description']
+        for idx, row in df.iterrows():
+            desc = str(row['Description'])
+            has_value = any(pd.notna(row[col]) for col in value_cols)
+            if (desc.strip().startswith('and ') or (desc and desc[0].islower() and prev_desc)) and prev_row is not None:
+                # Merge with previous
+                merged_desc = prev_row['Description'] + ' ' + desc.strip()
+                prev_row['Description'] = merged_desc
+                # If this row has value, move it up
+                for col in value_cols:
+                    if pd.notna(row[col]):
+                        prev_row[col] = row[col]
+            else:
+                prev_row = row.copy()
+                prev_desc = desc
+                merged_rows.append(prev_row)
+        return pd.DataFrame(merged_rows)
 
     def export_to_excel(self, data: Dict[str, List[dict]], pdf_name: str):
         # Create a timestamp for the filename
@@ -323,6 +346,8 @@ class TextExtractor:
                 for year in all_years:
                     df_data[year] = [line['numbers'].get(year, None) for line in lines]
                 df = pd.DataFrame(df_data)
+                # --- NEW: Merge multi-row descriptions ---
+                df = self.merge_multiline_descriptions(df)
                 print(f"\nWriting sheet: {stmt_type}")
                 print(f"DataFrame shape: {df.shape}")
                 print("DataFrame head:")
