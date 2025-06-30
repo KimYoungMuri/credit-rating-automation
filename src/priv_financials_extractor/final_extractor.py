@@ -9,7 +9,6 @@ import sys
 import numpy as np
 import pandas as pd
 from datetime import datetime
-from final_template_mapper import TemplateMatcher
 from sklearn.cluster import DBSCAN
 
 class TextExtractor: 

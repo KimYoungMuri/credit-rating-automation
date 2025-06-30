@@ -1,0 +1,173 @@
+{
+  "Cash and equivalents_current_assets_0": {
+    "template_field": "Cash and equivalents",
+    "section": "current_assets",
+    "original_description": "CURRENT ASSETS: Cash and cash equivalents $ $",
+    "value_2023": 10551.0,
+    "value_2024": 9327.0,
+    "confidence": 0.9,
+    "mapping_method": "enhanced_rule_based"
+  },
+  "Investments": {
+    "template_field": "Investments",
+    "section": "current_assets",
+    "original_description": "Consolidated: Margin deposits; Derivative assets",
+    "value_2023": 115979.0,
+    "value_2024": 79106.0,
+    "confidence": 0.85,
+    "mapping_method": "multi_item_consolidation"
+  },
+  "Accounts Receivable_current_assets_3": {
+    "template_field": "Accounts Receivable",
+    "section": "current_assets",
+    "original_description": "Accounts receivable\u2014net of allowance of $7,542 and $10,161 in 2024 and 2023, respectively",
+    "value_2023": 669700.0,
+    "value_2024": 604012.0,
+    "confidence": 0.9,
+    "mapping_method": "enhanced_rule_based"
+  },
+  "Inventory_current_assets_4": {
+    "template_field": "Inventory",
+    "section": "current_assets",
+    "original_description": "Inventories\u2014net",
+    "value_2023": 1071923.0,
+    "value_2024": 1100823.0,
+    "confidence": 0.9,
+    "mapping_method": "enhanced_rule_based"
+  },
+  "Prepaid Expenses_current_assets_5": {
+    "template_field": "Prepaid Expenses",
+    "section": "current_assets",
+    "original_description": "Notes receivable\u2014current portion",
+    "value_2023": 19567.0,
+    "value_2024": 33275.0,
+    "confidence": 0.9,
+    "mapping_method": "enhanced_rule_based"
+  },
+  "Other_current_assets": {
+    "template_field": "Other",
+    "section": "current_assets",
+    "original_description": "Consolidated 2 unmapped items",
+    "value_2023": null,
+    "value_2024": null,
+    "confidence": 0.75,
+    "mapping_method": "section_other_consolidation"
+  },
+  "Other_noncurrent_assets": {
+    "template_field": "Other",
+    "section": "noncurrent_assets",
+    "original_description": "Consolidated 2 unmapped items",
+    "value_2023": 7441.0,
+    "value_2024": 6007.0,
+    "confidence": 0.75,
+    "mapping_method": "section_other_consolidation"
+  },
+  "Net PPE": {
+    "template_field": "Net PPE",
+    "section": "noncurrent_assets",
+    "original_description": "Consolidated: PROPERTY AND EQUIPMENT\u2014Net; FINANCE LEASE ASSETS\u2014Net...",
+    "value_2023": 749090.0,
+    "value_2024": 812394.0,
+    "confidence": 0.85,
+    "mapping_method": "multi_item_consolidation"
+  },
+  "Intangibles_noncurrent_assets_12": {
+    "template_field": "Intangibles",
+    "section": "noncurrent_assets",
+    "original_description": "OTHER INTANGIBLE ASSETS\u2014Net",
+    "value_2023": 73870.0,
+    "value_2024": 50119.0,
+    "confidence": 0.9,
+    "mapping_method": "enhanced_rule_based"
+  },
+  "Goodwill_noncurrent_assets_13": {
+    "template_field": "Goodwill",
+    "section": "noncurrent_assets",
+    "original_description": "GOODWILL\u2014Net",
+    "value_2023": 415028.0,
+    "value_2024": 359998.0,
+    "confidence": 0.9,
+    "mapping_method": "enhanced_rule_based"
+  },
+  "Accounts Payable_current_liabilities_16": {
+    "template_field": "Accounts Payable",
+    "section": "current_liabilities",
+    "original_description": "CURRENT LIABILITIES: Accounts payable $ $",
+    "value_2023": 1012636.0,
+    "value_2024": 962675.0,
+    "confidence": 0.9,
+    "mapping_method": "enhanced_rule_based"
+  },
+  "Other_current_liabilities": {
+    "template_field": "Other",
+    "section": "current_liabilities",
+    "original_description": "Consolidated: Derivative liabilities; Long-term incentive\u2014current portion...",
+    "value_2023": 135453.0,
+    "value_2024": 95995.0,
+    "confidence": 0.85,
+    "mapping_method": "multi_item_consolidation"
+  },
+  "Accrued Interest": {
+    "template_field": "Accrued Interest",
+    "section": "current_liabilities",
+    "original_description": "Consolidated: Sales, excise and property taxes payable; Accrued liabilities",
+    "value_2023": 254444.0,
+    "value_2024": 229357.0,
+    "confidence": 0.85,
+    "mapping_method": "multi_item_consolidation"
+  },
+  "Current Portion of Long Term Debt": {
+    "template_field": "Current Portion of Long Term Debt",
+    "section": "current_liabilities",
+    "original_description": "Consolidated: Finance lease liability\u2014current portion; Operating lease liability\u2014current portion...",
+    "value_2023": 114139.0,
+    "value_2024": 121891.0,
+    "confidence": 0.85,
+    "mapping_method": "multi_item_consolidation"
+  },
+  "Long Term Debt": {
+    "template_field": "Long Term Debt",
+    "section": "noncurrent_liabilities",
+    "original_description": "Consolidated: REVOLVING LINES OF CREDIT; FINANCE LEASE LIABILITY...",
+    "value_2023": 1456560.0,
+    "value_2024": 1398025.0,
+    "confidence": 0.85,
+    "mapping_method": "multi_item_consolidation"
+  },
+  "Other_noncurrent_liabilities": {
+    "template_field": "Other",
+    "section": "noncurrent_liabilities",
+    "original_description": "Consolidated: LONG-TERM INCENTIVE; DEFERRED COMPENSATION...",
+    "value_2023": 170682.0,
+    "value_2024": 178996.0,
+    "confidence": 0.85,
+    "mapping_method": "multi_item_consolidation"
+  },
+  "Common Stock_equity_33": {
+    "template_field": "Common Stock",
+    "section": "equity",
+    "original_description": "TOTAL COMMON SHAREHOLDERS\u2019 EQUITY",
+    "value_2023": 289983.0,
+    "value_2024": 371598.0,
+    "confidence": 0.9,
+    "mapping_method": "enhanced_rule_based"
+  },
+  "Other_equity_34": {
+    "template_field": "Other",
+    "section": "equity",
+    "original_description": "NONCONTROLLING INTERESTS",
+    "value_2023": 14701.0,
+    "value_2024": 13305.0,
+    "confidence": 0.9,
+    "mapping_method": "enhanced_rule_based"
+  },
+  "Other_equity": {
+    "template_field": "Other",
+    "section": "equity",
+    "original_description": "Consolidated 2 unmapped items",
+    "value_2023": null,
+    "value_2024": null,
+    "confidence": 0.75,
+    "mapping_method": "section_other_consolidation"
+  }
+}

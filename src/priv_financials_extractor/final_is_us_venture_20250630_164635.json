@@ -1,0 +1,56 @@
+{
+  "Revenue": {
+    "template_field": "Revenue",
+    "section": "revenue",
+    "original_description": "Consolidated: 2024 2023 NET SALES $ $; Gain on sale of operating assets",
+    "value_2023": 14511307.0,
+    "value_2024": 14588971.0,
+    "confidence": 0.85,
+    "mapping_method": "multi_item_consolidation"
+  },
+  "Operating Expenses": {
+    "template_field": "Operating Expenses",
+    "section": "operating_expenses",
+    "original_description": "Consolidated: OPERATING COSTS AND EXPENSES: Petroleum and other product costs; Operating expenses...",
+    "value_2023": 28614758.0,
+    "value_2024": 28615801.0,
+    "confidence": 0.85,
+    "mapping_method": "multi_item_consolidation"
+  },
+  "Depreciation_non_operating_3": {
+    "template_field": "Depreciation",
+    "section": "non_operating",
+    "original_description": "Depreciation and amortization",
+    "value_2023": 135988.0,
+    "value_2024": 149852.0,
+    "confidence": 0.9,
+    "mapping_method": "enhanced_rule_based"
+  },
+  "Interest Income_non_operating_6": {
+    "template_field": "Interest Income",
+    "section": "non_operating",
+    "original_description": "OTHER INCOME (EXPENSE): Interest income",
+    "value_2023": 2537.0,
+    "value_2024": 8819.0,
+    "confidence": 0.9,
+    "mapping_method": "enhanced_rule_based"
+  },
+  "Interest Expense_non_operating_7": {
+    "template_field": "Interest Expense",
+    "section": "non_operating",
+    "original_description": "Interest expense",
+    "value_2023": -76054.0,
+    "value_2024": -96104.0,
+    "confidence": 0.9,
+    "mapping_method": "enhanced_rule_based"
+  },
+  "Other Income": {
+    "template_field": "Other Income",
+    "section": "non_operating",
+    "original_description": "Consolidated: Other expense\u2014net; Foreign currency translation and other",
+    "value_2023": -3584.0,
+    "value_2024": -3967.0,
+    "confidence": 0.85,
+    "mapping_method": "multi_item_consolidation"
+  }
+}
