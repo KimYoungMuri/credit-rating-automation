@@ -169,39 +169,40 @@ class SingleStatementMapper:
         return "\n".join(formatted)
     
     def create_comprehensive_prompt(self, extracted_data: Dict, statement_type: str) -> str:
-        """Create a comprehensive prompt for mapping an entire statement"""
-        
-        # Format the extracted data (limited size)
-        extracted_formatted = self.format_extracted_data(extracted_data)
-        
-        # Get and format template structure (simplified)
-        template_structure = self.get_template_structure(statement_type)
-        
-        # Simplified template format
-        template_lines = []
-        for section, items in template_structure.items():
-            template_lines.append(f"{section}: {', '.join(items[:3])}...")  # Show first 3 items per section
-        
-        template_formatted = "\n".join(template_lines)
-        
-        # Get years from extracted data
+        """
+        Create a comprehensive prompt for mapping a financial statement to the template.
+        """
         years = list(extracted_data.keys())
-        years_str = ", ".join(years)
-        
-        # Create statement-specific instructions (simplified)
+        years_str = ', '.join(years)
+        extracted_formatted = "\n".join([
+            f"- {desc} ({year}): {val}" for year, items in extracted_data.items() for desc, val in items.items()
+        ])
+        template_structure = self.get_template_structure(statement_type)
+        template_formatted = "\n".join([
+            f"Section: {section}\n  " + "\n  ".join(items) for section, items in template_structure.items()
+        ])
+
+        # Improved instructions for balance sheet
         if statement_type == 'balance_sheet':
             instructions = """
-MAPPING RULES:
-- Cash items → "Cash and equivalents"
-- Receivables → "Accounts Receivable" 
-- Inventory → "Inventory"
-- Property/Equipment → "Net PPE"
-- Goodwill → "Goodwill"
-- Payables → "Accounts Payable"
-- Debt → "Long Term Debt"
-- Stock → "Common Stock"
-- Earnings → "Retained Earnings"
-- Unmatched → "Other" in appropriate section
+MAPPING RULES & INSTRUCTIONS:
+- Use ONLY the following sections and line items (do not invent new rows):
+  * Current Assets: Cash and equivalents, Accounts Receivable, Prepaid Expenses, Inventory, Investments, Other
+  * Non-Current Assets: Net PPE, Goodwill, Intangibles, Other
+  * Current Liabilities: Accounts Payable, Accrued Interest, Short term Borrowing, Current Portion of Long Term Debt, Other
+  * Non-Current Liabilities: Long Term Debt, Deferred income taxes, Other
+  * Equity: Common Stock, Retained Earnings, Paid in Capital, Other
+- Map each extracted item to the most appropriate template row, using synonyms, abbreviations, and common accounting logic.
+- If an item does not fit any row, assign it to 'Other' in the appropriate section.
+- Do NOT map or generate values for any total/subtotal rows (e.g., 'Total Current Assets', 'Total Liabilities'). These are calculated by formulas.
+- For items that could fit multiple rows, pick the most specific match.
+- Group related items appropriately (e.g., multiple cash accounts → "Cash and equivalents").
+- Map each value to the correct year (see year mapping if provided).
+
+IMPORTANT:
+- Output must be STRICT JSON. Do NOT include any comments, explanations, or calculations in the output.
+- All values must be numbers, not expressions (e.g., use 33470, not 33275.0 + 195).
+- Do NOT use // comments or any non-JSON syntax. Only output the JSON object as specified below.
 """
         elif statement_type == 'income_statement':
             instructions = """
@@ -227,44 +228,12 @@ MAPPING RULES:
 """
         else:
             instructions = ""
-        
-        prompt = f"""You are a financial analyst mapping {statement_type.replace('_', ' ')} items to a template.
 
-EXTRACTED DATA (showing key items):
-{extracted_formatted}
+        prompt = f"""You are an expert financial analyst. Your task is to map extracted {statement_type.replace('_', ' ')} line items to a standardized template.\n\nEXTRACTED DATA (showing key items):\n{extracted_formatted}\n\nTEMPLATE SECTIONS AND ROWS:\n{template_formatted}\n\nINSTRUCTIONS:\n1. Map each item to the most appropriate template row\n2. Sum multiple items that map to the same row\n3. Use 'Other' for unmatched items\n4. Include all years ({years_str})\n\n{instructions}\nOUTPUT: JSON only with this structure:\n{{\n  \"mappings\": {{\n    \"Section Name\": {{\n      \"Template Row\": {{\n        \"{years[0]}\": value,\n        \"{years[1] if len(years) > 1 else years[0]}\": value\n      }}\n    }}\n  }},\n  \"unmapped_items\": [\n    {{\"description\": \"item\", \"year\": \"2022\", \"value\": 1000, \"reason\": \"no match\"}}\n  ]\n}}\n\nYour response:" """
 
-TEMPLATE SECTIONS:
-{template_formatted}
-
-INSTRUCTIONS:
-1. Map each item to the most appropriate template row
-2. Sum multiple items that map to the same row
-3. Use "Other" for unmatched items
-4. Include all years ({years_str})
-
-{instructions}
-
-OUTPUT: JSON only with this structure:
-{{
-  "mappings": {{
-    "Section Name": {{
-      "Template Row": {{
-        "{years[0]}": value,
-        "{years[1] if len(years) > 1 else years[0]}": value
-      }}
-    }}
-  }},
-  "unmapped_items": [
-    {{"description": "item", "year": "2022", "value": 1000, "reason": "no match"}}
-  ]
-}}
-
-Your response:"""
-        
         return prompt
     
     def is_total_row(self, description: str) -> bool:
-        """Check if description is a total/subtotal row"""
         desc_lower = description.lower().strip()
         total_patterns = [
             r'^total\s',
@@ -383,7 +352,7 @@ Your response:"""
         
         if statement_type == 'balance_sheet':
             sheet = wb['BS']
-            # Define row mappings for balance sheet
+            # Define row mappings for balance sheet - UPDATED to match actual template
             row_mappings = {
                 "Current Assets": {
                     "Cash and equivalents": 7,
@@ -418,6 +387,69 @@ Your response:"""
                     "Other": 41
                 }
             }
+            
+            # Get template year columns
+            year_cols = {}
+            for col in range(2, 10):  # Check columns B through I
+                cell_value = sheet.cell(row=1, column=col).value
+                if cell_value and str(cell_value).isdigit():
+                    year_cols[str(cell_value)] = openpyxl.utils.get_column_letter(col)
+            
+            print(f"[INFO] Template year columns: {year_cols}")
+            
+            # Apply mappings
+            applied_count = 0
+            for section, section_mappings in mappings.items():
+                if section not in row_mappings:
+                    print(f"[WARN] Template section '{section}' not found")
+                    continue
+                    
+                section_rows = row_mappings[section]
+                for template_row, year_values in section_mappings.items():
+                    if template_row not in section_rows:
+                        print(f"[WARN] Template row '{template_row}' not found in section '{section}'")
+                        continue
+                        
+                    row_idx = section_rows[template_row]
+                    
+                    for year, value in year_values.items():
+                        # Handle year mapping
+                        target_year = year
+                        if year_mapping and year in year_mapping:
+                            target_year = year_mapping[year]
+                        
+                        if target_year not in year_cols:
+                            print(f"[WARN] Year '{target_year}' not found in template columns")
+                            continue
+                        
+                        col = year_cols[target_year]
+                        
+                        # Handle different value types
+                        if isinstance(value, dict):
+                            # If value is a dict, try to get a numeric value
+                            numeric_value = None
+                            for k, v in value.items():
+                                if isinstance(v, (int, float)) and v != 0:
+                                    numeric_value = v
+                                    break
+                            if numeric_value is not None:
+                                sheet[f"{col}{row_idx}"] = numeric_value
+                                applied_count += 1
+                        elif isinstance(value, (int, float)):
+                            sheet[f"{col}{row_idx}"] = value
+                            applied_count += 1
+                        else:
+                            print(f"[WARN] Non-numeric value for {template_row} {year}: {value}")
+            
+            print(f"[SUCCESS] Applied {applied_count} values to template")
+            
+            # Save populated template
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_path = f"single_statement_{statement_type}_{timestamp}.xlsx"
+            wb.save(output_path)
+            wb.close()
+            
+            return output_path
         elif statement_type == 'income_statement':
             sheet = wb['IS.CF']
             # Define row mappings for income statement
@@ -538,7 +570,7 @@ Your response:"""
         return output_path
 
 def main():
-    """Test the single statement mapper"""
+    # Test the single statement mapper
     mapper = SingleStatementMapper()
     
     if not mapper.check_ollama_available():

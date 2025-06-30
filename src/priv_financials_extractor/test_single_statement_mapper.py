@@ -110,7 +110,22 @@ def test_single_statement_mapping():
                 for template_row, year_values in section_mappings.items():
                     print(f"    {template_row}:")
                     for year, value in year_values.items():
-                        print(f"      {year}: {value:,.0f}")
+                        # Handle different value types
+                        if isinstance(value, dict):
+                            # If value is a dict, try to get a numeric value
+                            numeric_value = None
+                            for k, v in value.items():
+                                if isinstance(v, (int, float)) and v != 0:
+                                    numeric_value = v
+                                    break
+                            if numeric_value is not None:
+                                print(f"      {year}: {numeric_value:,.0f}")
+                            else:
+                                print(f"      {year}: {value}")
+                        elif isinstance(value, (int, float)):
+                            print(f"      {year}: {value:,.0f}")
+                        else:
+                            print(f"      {year}: {value}")
             
             if unmapped:
                 print(f"\n⚠️  UNMAPPED ITEMS:")
@@ -121,7 +136,17 @@ def test_single_statement_mapping():
             template_path = project_root / "templates" / "financial_template.xlsx"
             if template_path.exists():
                 print(f"\n📝 Applying mappings to template...")
-                output_path = mapper.apply_mappings_to_excel(mappings, str(template_path), statement_type)
+                
+                # Create year mapping for generic Value_1, Value_2 columns
+                year_mapping = {}
+                if 'Value_1' in statement_data:
+                    year_mapping['Value_1'] = '2023'  # Assume Value_1 is 2023
+                if 'Value_2' in statement_data:
+                    year_mapping['Value_2'] = '2024'  # Assume Value_2 is 2024
+                
+                print(f"[INFO] Year mapping: {year_mapping}")
+                
+                output_path = mapper.apply_mappings_to_excel(mappings, str(template_path), statement_type, year_mapping)
                 print(f"✅ Template saved to: {output_path}")
             else:
                 print(f"⚠️  Template not found at {template_path}")
