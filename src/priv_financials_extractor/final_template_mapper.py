@@ -89,12 +89,9 @@ Ending Cash
 import pandas as pd
 import numpy as np
 from pathlib import Path
-import torch
-from transformers import BertTokenizer, BertForSequenceClassification
 import logging
 from typing import Dict, List, Tuple, Optional
 import re
-import pdfplumber
 from sentence_transformers import SentenceTransformer
 import shutil
 from openpyxl import load_workbook
@@ -550,7 +547,7 @@ class TemplateMatcher:
                 r'revenue', r'sales', r'income\s+from\s+operations'
             ],
             'Operating Expenses': [
-                r'cost\s+of\s+(?:goods\s+sold|revenue|sales)',
+                r'cost\s+of\s+(?:goods\s+)?(?:sales|revenue)',
                 r'operating\s+expense', r'selling', r'administrative',
                 r'depreciation', r'amortization'
             ],
@@ -771,7 +768,7 @@ class TemplateMatcher:
             if chunk_assignments:
                 print(f"[DEBUG] LLM batch assignment successful: {chunk_assignments}")
                 all_assignments.update(chunk_assignments)
-            else:
+                                else:
                 print(f"[WARN] LLM failed for chunk: {descriptions}. Falling back to rule-based for this chunk.")
                 # Fall back to rule-based for this chunk
                 for line in chunk:
@@ -805,7 +802,7 @@ class TemplateMatcher:
                     if self.get_similarity(desc, llm_desc) > 0.8:
                         section = self.convert_llm_section_to_template_section(llm_section)
                         source = f"LLM (fuzzy match: \"{llm_desc}\")"
-                        break
+                                break
                 
                 if section is None:
                     # Fall back to rule-based
@@ -1088,21 +1085,21 @@ class TemplateMatcher:
         return False
 
     def apply_rule_based_mapping(self, description: str) -> tuple[str, float]:
-        """Apply rule-based mapping for balance sheet items"""
+        """Apply rule-based mapping for balance sheet items (expanded for edge cases)"""
         import re
         desc_lower = description.lower()
         
-        # Balance sheet rule-based mapping - EXPANDED
+        # Expanded rule-based mapping
         bs_rules = {
             r'cash\s+(?:and\s+)?(?:cash\s+)?equivalents?': 'Cash and equivalents',
             r'accounts?\s+receivable(?:[—-]net)?': 'Accounts Receivable',
-            r'notes?\s+receivable': 'Accounts Receivable',  # Added
+            r'notes?\s+receivable': 'Accounts Receivable',
             r'prepaid\s+expenses?': 'Prepaid Expenses',
             r'inventor(?:y|ies)(?:[—-]net)?': 'Inventory',
             r'property\s+(?:and\s+)?equipment(?:[—-]net)?': 'Net PPE',
-            r'property\s+(?:and\s+)?equipment\s+at\s+cost': 'Net PPE',  # Added
-            r'less\s+accumulated\s+depreciation': 'Net PPE',  # Added
-            r'accumulated\s+depreciation': 'Net PPE',  # Added
+            r'property\s+(?:and\s+)?equipment\s+at\s+cost': 'Net PPE',
+            r'less\s+accumulated\s+depreciation': 'Net PPE',
+            r'accumulated\s+depreciation': 'Net PPE',
             r'net\s+ppe': 'Net PPE',
             r'goodwill(?:[—-]net)?': 'Goodwill',
             r'(?:other\s+)?intangible\s+assets?(?:[—-]net)?': 'Intangibles',
@@ -1113,46 +1110,66 @@ class TemplateMatcher:
             r'common\s+stock': 'Common Stock',
             r'retained\s+earnings?': 'Retained Earnings',
             r'paid[- ]in\s+capital': 'Paid in Capital',
-            # Additional patterns for common items
-            r'margin\s+deposits?': 'Investments',  # Added
-            r'derivative\s+assets?': 'Investments',  # Added
-            r'derivative\s+liabilities?': 'Other',  # Added
-            r'right\s+of\s+use\s+assets?': 'Net PPE',  # Added
-            r'finance\s+lease\s+assets?': 'Net PPE',  # Added
-            r'finance\s+lease\s+liability': 'Long Term Debt',  # Added
-            r'operating\s+lease\s+liability': 'Long Term Debt',  # Added
-            r'current\s+portion\s+of\s+long[- ]term\s+debt': 'Current Portion of Long Term Debt',  # Added
-            r'revolving\s+lines?\s+of\s+credit': 'Short term Borrowing',  # Added
-            r'long[- ]term\s+incentive': 'Other',  # Added
-            r'deferred\s+compensation': 'Other',  # Added
-            r'contingent\s+consideration': 'Other',  # Added
-            r'subchapter\s+s\s+income\s+tax': 'Other',  # Added
-            r'noncontrolling\s+interests?': 'Other',  # Added
-            r'other\s+(?:current|noncurrent)\s+assets?': 'Other',  # Added
-            r'other\s+(?:current|noncurrent)\s+liabilities?': 'Other',  # Added
+            # Edge/extra items:
+            r'margin\s+deposits?': 'Investments',
+            r'derivative\s+assets?': 'Investments',
+            r'derivative\s+liabilities?': 'Other',
+            r'right\s+of\s+use\s+assets?': 'Net PPE',
+            r'finance\s+lease\s+assets?': 'Net PPE',
+            r'finance\s+lease\s+liability': 'Long Term Debt',
+            r'operating\s+lease\s+liability': 'Long Term Debt',
+            r'current\s+portion\s+of\s+long[- ]term\s+debt': 'Current Portion of Long Term Debt',
+            r'revolving\s+lines?\s+of\s+credit': 'Short term Borrowing',
+            r'long[- ]term\s+incentive': 'Other',
+            r'deferred\s+compensation': 'Other',
+            r'contingent\s+consideration': 'Other',
+            r'subchapter\s+s\s+income\s+tax': 'Other',
+            r'subchapter\s+s\s+income\s+tax\s+deposit': 'Other',
+            r'subchapter\s+s\s+income\s+tax\s+deposit\s+obligation': 'Other',
+            r'deferred\s+compensation\s+plan\s+investments?': 'Investments',
+            r'other\s+current\s+assets?': 'Other',
+            r'other\s+noncurrent\s+assets?': 'Other',
+            r'other\s+noncurrent\s+liabilities?': 'Other',
+            r'other\s+assets?': 'Other',
+            r'other\s+liabilities?': 'Other',
+            r'noncontrolling\s+interests?': 'Other',
         }
-        
         for pattern, template_item in bs_rules.items():
             if re.search(pattern, desc_lower):
-                return template_item, 0.9
-        
+                print(f"[RULE-MAP] '{description}' -> '{template_item}' (pattern: {pattern})")
+                return template_item, 0.95
+        print(f"[RULE-MAP-FAIL] '{description}' did not match any rule-based pattern.")
         return None, 0.0
 
     def apply_rule_based_mapping_is(self, description: str) -> tuple[str, float]:
         """Apply rule-based mapping for income statement items"""
-        import re
+            import re
         desc_lower = description.lower()
         
-        # Income statement rule-based mapping
+        # Income statement rule-based mapping - EXPANDED
         is_rules = {
             r'revenue(?:s)?': 'Revenue',
-            r'cost\s+of\s+(?:goods\s+)?sales?': 'Cost of Sales',
+            r'net\s+revenue': 'Revenue',
+            r'net\s+sales': 'Revenue',
+            r'sales': 'Revenue',
+            r'cost\s+of\s+(?:goods\s+)?(?:sales|revenue)': 'Cost of Sales',
+            r'cost\s+of\s+revenue': 'Cost of Sales',
             r'gross\s+profit': 'Gross Profit',
             r'operating\s+expenses?': 'Operating Expenses',
             r'operating\s+income': 'Operating Income',
+            r'operating\s+loss': 'Operating Income',
+            r'depreciation\s+and\s+amortization': 'Depreciation and amortization',
+            r'depreciation': 'Depreciation and amortization',
+            r'amortization': 'Depreciation and amortization',
+            r'impairment\s+and\s+other\s+losses?': 'Impairment and other losses',
+            r'impairment': 'Impairment and other losses',
             r'interest\s+expense': 'Interest Expense',
+            r'interest\s+income': 'Interest Income',
             r'income\s+tax(?:es)?': 'Income Tax Expense',
-            r'net\s+income': 'Net Income'
+            r'income\s+tax\s+benefit': 'Income Tax Benefit',
+            r'net\s+income': 'Net Income',
+            r'net\s+loss': 'Net Income',
+            r'net\s+profit': 'Net Income'
         }
         
         for pattern, template_item in is_rules.items():
@@ -1164,7 +1181,7 @@ class TemplateMatcher:
     def apply_rule_based_mapping_cfs(self, description: str) -> tuple[str, float]:
         """Apply rule-based mapping for cash flow statement items"""
         import re
-        desc_lower = description.lower()
+            desc_lower = description.lower()
             
         # Cash flow statement rule-based mapping - EXPANDED
         cfs_rules = {
@@ -1200,8 +1217,8 @@ class TemplateMatcher:
         for pattern, template_item in cfs_rules.items():
             if re.search(pattern, desc_lower):
                 return template_item, 0.9
-        
-        return None, 0.0
+            
+            return None, 0.0
 
     def get_semantic_match(self, description: str, template_items: list, section_context: str) -> tuple[str, float]:
         """Get semantic match using sentence transformers"""
@@ -1317,7 +1334,7 @@ class TemplateMatcher:
             row_map = self.get_bs_row_map(bs_sheet, *self.get_section_row_range(section))
             if not row_map:
                 print(f"Warning: No row map found for section '{section}'")
-                continue
+                    continue
                 
             template_items = list(row_map.keys())
             print(f"[DEBUG] Template items for {section}: {template_items}")
@@ -1333,13 +1350,13 @@ class TemplateMatcher:
                 # Skip totals (should have been filtered, but double-check)
                 if self.is_total_or_net_row(desc):
                     print(f"  [SKIP TOTAL] '{desc}' is a total/subtotal row.")
-                    continue
+                            continue
                 
                 # Get mapping from batch results
                 if desc in batch_mappings:
                     template_item, confidence, method = batch_mappings[desc]
                     print(f"  [MAP-BATCH] '{desc}' -> {template_item} (confidence: {confidence:.2f}, method: {method})")
-                else:
+                            else:
                     # Fall back to individual mapping
                     template_item, confidence, method = self.hybrid_map_item_decoupled(
                         desc, template_items, section, 'balance_sheet'
@@ -1350,7 +1367,7 @@ class TemplateMatcher:
                     # Write to template (implementation depends on your existing logic)
                     # ... (continue with existing mapping logic)
                     pass
-                else:
+                    else:
                     print(f"  [MAP-OTHER] '{desc}' -> Other (no match found)")
                     # Add to "Other" category
                     # ... (continue with existing logic)
@@ -1389,8 +1406,18 @@ class TemplateMatcher:
         return result
 
     def map_to_template(self, extracted_data: Dict, template_path: str) -> str:
+        """
+        Main template mapping function using hybrid approach:
+        1. Rule-based mapping (fastest, most reliable)
+        2. Semantic matching (for similar items)
+        3. LLM fallback (for ambiguous items only)
+        """
+        print("\n🚀 Starting Hybrid Template Mapping")
+        print("=" * 60)
+        
         # Convert to dict-of-years format if needed
         extracted_data = self.ensure_dict_of_years_format(extracted_data)
+        
         # Load the template workbook
         shutil.copy(template_path, "temp_template.xlsx")
         wb = load_workbook("temp_template.xlsx")
@@ -1399,92 +1426,36 @@ class TemplateMatcher:
         bs_sheet = wb['BS']
         is_cf_sheet = wb['IS.CF']
 
-        # Determine year columns from the template (assuming they are in B, C, D, E starting from row 6)
-        year_cols = {}
-        print("DEBUG: Starting year column detection...")
-        # Heuristic: Find years in row 6 of the Balance Sheet
-        for col_idx in range(2, 6): # Check columns B, C, D, E
-            cell_val = bs_sheet.cell(row=6, column=col_idx).value
-            col_letter = openpyxl.utils.get_column_letter(col_idx)
-            print(f"DEBUG: Checking column {col_letter} (row 6): {cell_val} (type: {type(cell_val)})")
-            
-            if isinstance(cell_val, int) and 1990 <= cell_val <= 2050:
-                year_cols[str(cell_val)] = col_letter
-                print(f"DEBUG: Found direct year {cell_val} in column {col_letter}")
-            elif isinstance(cell_val, str) and cell_val.startswith('='):
-                # Handle Excel formulas like "=B6+1" - extract the year
-                print(f"DEBUG: Found formula {cell_val}, attempting to parse...")
-                try:
-                    # Simple parsing for formulas like "=B6+1" where B6 contains 2020
-                    if '+1' in cell_val:
-                        base_cell = cell_val.split('+')[0][1:]  # Extract "B6" from "=B6+1"
-                        base_col = base_cell[0]  # "B"
-                        base_row = int(base_cell[1:])  # 6
-                        base_year = bs_sheet[f"{base_col}{base_row}"].value
-                        print(f"DEBUG: Base cell {base_col}{base_row} contains: {base_year}")
-                        if isinstance(base_year, int):
-                            # Calculate the year for this column
-                            col_offset = col_idx - openpyxl.utils.column_index_from_string(base_col)
-                            calculated_year = base_year + col_offset
-                            print(f"DEBUG: Calculated year: {base_year} + {col_offset} = {calculated_year}")
-                            if 1990 <= calculated_year <= 2050:
-                                year_cols[str(calculated_year)] = col_letter
-                                print(f"DEBUG: Found calculated year {calculated_year} in column {col_letter}")
-                except Exception as e:
-                    print(f"DEBUG: Error parsing formula {cell_val}: {e}")
-                    pass
-
+        # Determine year columns from the template
+        year_cols = self.get_year_columns_from_template(bs_sheet)
         if not year_cols:
-            print("ERROR: Could not determine year columns from template. Aborting.")
+            print("❌ ERROR: Could not determine year columns from template. Aborting.")
             return ""
 
-        print(f"DEBUG: Found year columns in template: {year_cols}")
+        print(f"✅ Found year columns: {year_cols}")
 
-        # Map extracted years to template years if they don't match
-        template_years = list(year_cols.keys())
-        year_mapping = {}
-        
-        # Check if we need to map years
-        if 'balance_sheet' in extracted_data:
-            extracted_years = list(extracted_data['balance_sheet'].keys())
-            print(f"[DEBUG] Extracted years: {extracted_years}")
-            print(f"[DEBUG] Template years: {template_years}")
-            
-            if set(extracted_years) != set(template_years):
-                print(f"[DEBUG] Year mismatch detected. Mapping extracted years to template years...")
-                # Map extracted years to template years (first to first, second to second, etc.)
-                for i, extracted_year in enumerate(extracted_years):
-                    if i < len(template_years):
-                        template_year = template_years[i]
-                        year_mapping[extracted_year] = template_year
-                        print(f"[DEBUG] Mapping {extracted_year} -> {template_year}")
-                    else:
-                        print(f"[DEBUG] Warning: No template year available for {extracted_year}")
-            else:
-                # Years match, create direct mapping
-                year_mapping = {year: year for year in extracted_years}
-                print(f"[DEBUG] Years match, using direct mapping")
-        
-        print(f"[DEBUG] Final year mapping: {year_mapping}")
+        # Create year mapping between extracted and template years
+        year_mapping = self.create_year_mapping(extracted_data, year_cols)
+        print(f"✅ Year mapping: {year_mapping}")
+
+        # Track mapping statistics
+        mapping_stats = {
+            'rule_based': 0,
+            'semantic': 0,
+            'llm_fallback': 0,
+            'unmapped': 0,
+            'total_items': 0
+        }
 
         # --- Balance Sheet Mapping ---
         if 'balance_sheet' in extracted_data:
-            print("\n--- Processing Balance Sheet ---")
-            print(f"[DEBUG] Template year columns: {year_cols}")
-            print(f"[DEBUG] Extracted balance sheet years: {list(extracted_data['balance_sheet'].keys())}")
-            
-            # --- Get Balance Sheet row maps ---
-            # Updated row ranges to match the template screenshots
-            row_maps = {
-                'current_assets': self.get_bs_row_map(bs_sheet, 7, 13),           # Includes 'Other' at 12, Total at 13
-                'noncurrent_assets': self.get_bs_row_map(bs_sheet, 16, 19),      # Includes 'Other' at 18, Total at 19
-                'non_current_assets': self.get_bs_row_map(bs_sheet, 16, 19),     # Alternative naming
-                'current_liabilities': self.get_bs_row_map(bs_sheet, 24, 29),    # Includes 'Other' at 28, Total at 29
-                'noncurrent_liabilities': self.get_bs_row_map(bs_sheet, 31, 34), # Includes 'Other' at 33, Total at 34
-                'equity': self.get_bs_row_map(bs_sheet, 38, 43)                  # Includes 'Other' at 42, Total at 43
-            }
-            # NOTE: If you update the template, update these row ranges accordingly.
+            print("\n📊 Processing Balance Sheet")
+            print("-" * 40)
+            mapping_stats = self.map_balance_sheet_hybrid(
+                extracted_data['balance_sheet'], bs_sheet, year_cols, year_mapping, mapping_stats
+            )
 
+<<<<<<< HEAD
             # Collect all years and columns
             years = [str(y) for y in extracted_data['balance_sheet'].keys() if str(y) in year_cols]
             if not years:
@@ -1983,6 +1954,34 @@ class TemplateMatcher:
                         if isinstance(existing_val, str): existing_val = 0
                                 is_cf_sheet[f"{col}{row_idx}"] = existing_val + val_float
                                 print(f"  [MAP-OTHER-CFS] '{desc}' -> {section}::Other ({val_float})")
+=======
+        """
+        # --- Income Statement Mapping ---
+        if 'income_statement' in extracted_data:
+            print("\n📈 Processing Income Statement")
+            print("-" * 40)
+            mapping_stats = self.map_income_statement_hybrid(
+                extracted_data['income_statement'], is_cf_sheet, year_cols, year_mapping, mapping_stats
+            )
+    
+        # --- Cash Flow Statement Mapping ---
+        if 'cash_flow' in extracted_data:
+            print("\n💰 Processing Cash Flow Statement")
+            print("-" * 40)
+            mapping_stats = self.map_cash_flow_hybrid(
+                extracted_data['cash_flow'], is_cf_sheet, year_cols, year_mapping, mapping_stats
+            )
+        """
+
+        # Print final statistics
+        print("\n📊 MAPPING STATISTICS")
+        print("=" * 60)
+        print(f"Total items processed: {mapping_stats['total_items']}")
+        print(f"Rule-based mappings: {mapping_stats['rule_based']} ({mapping_stats['rule_based']/max(1, mapping_stats['total_items'])*100:.1f}%)")
+        print(f"Semantic mappings: {mapping_stats['semantic']} ({mapping_stats['semantic']/max(1, mapping_stats['total_items'])*100:.1f}%)")
+        print(f"LLM fallback mappings: {mapping_stats['llm_fallback']} ({mapping_stats['llm_fallback']/max(1, mapping_stats['total_items'])*100:.1f}%)")
+        print(f"Unmapped items: {mapping_stats['unmapped']} ({mapping_stats['unmapped']/max(1, mapping_stats['total_items'])*100:.1f}%)")
+>>>>>>> 4687d00199131f627a51fd90a4a41ba0b5faba04
 
         # Save the populated template
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1994,18 +1993,416 @@ class TemplateMatcher:
         populated_template_path = output_dir / f"populated_template_{timestamp}.xlsx"
         wb.save(populated_template_path)
         
-        # Close the workbook before trying to delete the temp file
+        # Close the workbook and clean up
         wb.close()
-        
-        # Try to delete the temporary file with error handling
         try:
+<<<<<<< HEAD
         Path("temp_template.xlsx").unlink()
         except (PermissionError, FileNotFoundError) as e:
             print(f"Warning: Could not delete temporary file temp_template.xlsx: {e}")
             # The file will be cleaned up later or can be deleted manually
+=======
+            Path("temp_template.xlsx").unlink()
+        except (PermissionError, FileNotFoundError):
+            pass
+>>>>>>> 4687d00199131f627a51fd90a4a41ba0b5faba04
         
-        print(f"\nTemplate populated and saved to: {populated_template_path}")
+        print(f"\n✅ Template populated and saved to: {populated_template_path}")
         return str(populated_template_path)
+
+    def get_year_columns_from_template(self, bs_sheet) -> Dict[str, str]:
+        """Extract year columns from the template with improved detection."""
+        year_cols = {}
+        
+        print(f"[DEBUG] Template sheet dimensions: {bs_sheet.max_row} rows x {bs_sheet.max_column} columns")
+        
+        # Try multiple rows for year detection
+        for row_num in [6, 5, 7, 4, 8]:  # Common header rows
+            print(f"[DEBUG] Checking row {row_num} for year headers...")
+            for col_idx in range(2, min(10, bs_sheet.max_column + 1)):  # Check columns B through I
+                cell_val = bs_sheet.cell(row=row_num, column=col_idx).value
+                col_letter = openpyxl.utils.get_column_letter(col_idx)
+                
+                print(f"[DEBUG] Cell {col_letter}{row_num}: '{cell_val}' (type: {type(cell_val)})")
+                
+                if isinstance(cell_val, int) and 1990 <= cell_val <= 2050:
+                    year_cols[str(cell_val)] = col_letter
+                    print(f"[DEBUG] Found year {cell_val} in column {col_letter}")
+                elif isinstance(cell_val, str):
+                    # Handle Excel formulas
+                    if cell_val.startswith('=') and '+1' in cell_val:
+                        try:
+                            base_cell = cell_val.split('+')[0][1:]
+                            base_col = base_cell[0]
+                            base_row = int(base_cell[1:])
+                            base_year = bs_sheet[f"{base_col}{base_row}"].value
+                            if isinstance(base_year, int):
+                                col_offset = col_idx - openpyxl.utils.column_index_from_string(base_col)
+                                calculated_year = base_year + col_offset
+                                if 1990 <= calculated_year <= 2050:
+                                    year_cols[str(calculated_year)] = col_letter
+                                    print(f"[DEBUG] Found calculated year {calculated_year} in column {col_letter}")
+                        except Exception as e:
+                            print(f"[DEBUG] Error parsing formula {cell_val}: {e}")
+                            pass
+                    # Handle year strings
+                    elif cell_val.isdigit() and len(cell_val) == 4 and 1990 <= int(cell_val) <= 2050:
+                        year_cols[cell_val] = col_letter
+                        print(f"[DEBUG] Found year string {cell_val} in column {col_letter}")
+                    # Handle year-like strings with spaces or formatting
+                    elif re.match(r'^\s*\d{4}\s*$', cell_val):
+                        year_val = cell_val.strip()
+                        if 1990 <= int(year_val) <= 2050:
+                            year_cols[year_val] = col_letter
+                            print(f"[DEBUG] Found formatted year {year_val} in column {col_letter}")
+        
+        if not year_cols:
+            print("[WARN] No years found in template headers. Trying fallback detection...")
+            # Fallback: look for any 4-digit numbers in the first 10 rows
+            for row_num in range(1, min(11, bs_sheet.max_row + 1)):
+                for col_idx in range(2, min(10, bs_sheet.max_column + 1)):
+                    cell_val = bs_sheet.cell(row=row_num, column=col_idx).value
+                    if isinstance(cell_val, (int, str)) and str(cell_val).isdigit():
+                        year_val = str(cell_val).strip()
+                        if len(year_val) == 4 and 1990 <= int(year_val) <= 2050:
+                            col_letter = openpyxl.utils.get_column_letter(col_idx)
+                            year_cols[year_val] = col_letter
+                            print(f"[DEBUG] Fallback: Found year {year_val} in column {col_letter} at row {row_num}")
+        
+        print(f"[DEBUG] Final year columns found: {year_cols}")
+        return year_cols
+
+    def create_year_mapping(self, extracted_data: Dict, year_cols: Dict[str, str]) -> Dict[str, str]:
+        """Create mapping between extracted years and template years."""
+        template_years = list(year_cols.keys())
+        year_mapping = {}
+        
+        # Find extracted years from any statement type
+        extracted_years = set()
+        for stmt_type, data in extracted_data.items():
+            if isinstance(data, dict):
+                extracted_years.update(data.keys())
+        
+        if not extracted_years:
+            return {}
+        
+        # Map extracted years to template years
+        extracted_years_list = sorted(list(extracted_years))
+        for i, extracted_year in enumerate(extracted_years_list):
+            if i < len(template_years):
+                template_year = template_years[i]
+                year_mapping[extracted_year] = template_year
+        
+        return year_mapping
+
+    def map_balance_sheet_hybrid(self, bs_data: Dict, bs_sheet, year_cols: Dict[str, str], 
+                                year_mapping: Dict[str, str], stats: Dict) -> Dict:
+        """Map balance sheet using hybrid approach, printing template items for each section."""
+        # Get template row mappings
+        row_maps = {
+            'current_assets': self.get_bs_row_map(bs_sheet, 7, 13),
+            'noncurrent_assets': self.get_bs_row_map(bs_sheet, 16, 19),
+            'current_liabilities': self.get_bs_row_map(bs_sheet, 24, 29),
+            'noncurrent_liabilities': self.get_bs_row_map(bs_sheet, 31, 34),
+            'equity': self.get_bs_row_map(bs_sheet, 38, 43)
+        }
+        # Process each year
+        for extracted_year, mapped_year in year_mapping.items():
+            if mapped_year not in year_cols:
+                    continue
+            col = year_cols[mapped_year]
+            year_data = bs_data.get(extracted_year, {})
+            if not isinstance(year_data, dict):
+                continue
+            print(f"\n📅 Processing year {extracted_year} -> {mapped_year}")
+            # Group items by section for efficient processing
+            section_items = self.group_balance_sheet_items(year_data)
+            # Process each section
+            for section, items in section_items.items():
+                if not items:
+                    continue
+                row_map = row_maps.get(section)
+                if not row_map:
+                    continue
+                template_items = list(row_map.keys())
+                print(f"  [TEMPLATE ITEMS] Section: {section} -> {template_items}")
+                # Use hybrid mapping for this section
+                section_stats = self.map_section_hybrid(
+                    items, template_items, section, 'balance_sheet', 
+                    bs_sheet, col, row_map, stats
+                )
+                # Update overall stats
+                for key in stats:
+                    stats[key] += section_stats.get(key, 0)
+        return stats
+
+    def map_income_statement_hybrid(self, is_data: Dict, is_cf_sheet, year_cols: Dict[str, str], 
+                                   year_mapping: Dict[str, str], stats: Dict) -> Dict:
+        """Map income statement using hybrid approach."""
+        
+        # Get template row mappings
+        row_maps = {
+            'revenue': self.get_is_row_map(is_cf_sheet, 'revenue'),
+            'operating_expenses': self.get_is_row_map(is_cf_sheet, 'operating_expenses'),
+            'other_income_expense': self.get_is_row_map(is_cf_sheet, 'other_income_expense'),
+            'tax_net_income': self.get_is_row_map(is_cf_sheet, 'tax_net_income')
+        }
+        
+        # Process each year
+        for extracted_year, mapped_year in year_mapping.items():
+            if mapped_year not in year_cols:
+                continue
+                
+            col = year_cols[mapped_year]
+            year_data = is_data.get(extracted_year, {})
+            
+            if not isinstance(year_data, dict):
+                            continue
+                        
+            print(f"\n📅 Processing year {extracted_year} -> {mapped_year}")
+            
+            # Group items by section
+            section_items = self.group_income_statement_items(year_data)
+            
+            # Process each section
+            for section, items in section_items.items():
+                if not items:
+                            continue
+                        
+                row_map = row_maps.get(section)
+                if not row_map:
+                            continue
+                        
+                template_items = list(row_map.keys())
+                print(f"  📋 Section: {section} ({len(items)} items)")
+                
+                # Use hybrid mapping for this section
+                section_stats = self.map_section_hybrid(
+                    items, template_items, section, 'income_statement', 
+                    is_cf_sheet, col, row_map, stats
+                )
+                
+                # Update overall stats
+                for key in stats:
+                    stats[key] += section_stats.get(key, 0)
+        
+        return stats
+
+    def map_cash_flow_hybrid(self, cf_data: Dict, is_cf_sheet, year_cols: Dict[str, str], 
+                            year_mapping: Dict[str, str], stats: Dict) -> Dict:
+        """Map cash flow statement using hybrid approach."""
+        
+        # Get template row mappings
+        row_maps = {
+            'operating_activities': self.get_cfs_row_map(['Net profit (loss)', 'Depreciation', 'Changes in operating assets and liabilities', 'Other Operating Activities'], 'operating_activities'),
+            'investing_activities': self.get_cfs_row_map(['Purchases of property and equipment', 'Proceeds from sale of assets', 'Other Investing Activities'], 'investing_activities'),
+            'financing_activities': self.get_cfs_row_map(['Proceeds from issuance', 'Principal payments', 'Other Financing Activities'], 'financing_activities'),
+            'cash_reconciliation': self.get_cfs_row_map(['Net change in Cash', 'Starting Cash', 'Ending Cash'], 'cash_reconciliation')
+        }
+        
+        # Process each year
+        for extracted_year, mapped_year in year_mapping.items():
+            if mapped_year not in year_cols:
+                continue
+                
+            col = year_cols[mapped_year]
+            year_data = cf_data.get(extracted_year, {})
+            
+            if not isinstance(year_data, dict):
+                            continue
+                        
+            print(f"\n📅 Processing year {extracted_year} -> {mapped_year}")
+            
+            # Group items by section
+            section_items = self.group_cash_flow_items(year_data)
+            
+            # Process each section
+            for section, items in section_items.items():
+                if not items:
+                            continue
+                        
+                row_map = row_maps.get(section)
+                if not row_map:
+                            continue
+                        
+                template_items = list(row_map.keys())
+                print(f"  📋 Section: {section} ({len(items)} items)")
+                
+                # Use hybrid mapping for this section
+                section_stats = self.map_section_hybrid(
+                    items, template_items, section, 'cash_flow', 
+                    is_cf_sheet, col, row_map, stats
+                )
+                
+                # Update overall stats
+                for key in stats:
+                    stats[key] += section_stats.get(key, 0)
+        
+        return stats
+
+    def map_section_hybrid(self, items: List[Dict], template_items: List[str], section: str, 
+                          statement_type: str, sheet, col: str, row_map: Dict, stats: Dict) -> Dict:
+        """Map a section of items using the hybrid approach, with debug prints for every mapping."""
+        section_stats = {'rule_based': 0, 'semantic': 0, 'llm_fallback': 0, 'unmapped': 0, 'total_items': 0}
+        for item in items:
+            desc = item['description']
+            value = item['value']
+            if self.is_total_or_net_row(desc):
+                continue
+            section_stats['total_items'] += 1
+            stats['total_items'] += 1
+            template_item, confidence, method = self.hybrid_map_item_decoupled(
+                desc, template_items, section, statement_type
+            )
+            if template_item and template_item in row_map:
+                row_idx = row_map[template_item]
+                sheet[f"{col}{row_idx}"] = value
+                if 'rule_based' in method:
+                    section_stats['rule_based'] += 1
+                    stats['rule_based'] += 1
+                elif 'semantic' in method:
+                    section_stats['semantic'] += 1
+                    stats['semantic'] += 1
+                elif 'llm_fallback' in method:
+                    section_stats['llm_fallback'] += 1
+                    stats['llm_fallback'] += 1
+                print(f"[MAP-SUCCESS] '{desc}' -> '{template_item}' [{method}]")
+                            else:
+                other_item = self.get_other_category_for_section(section, statement_type)
+                if other_item and other_item in row_map:
+                    row_idx = row_map[other_item]
+                    existing_val = sheet[f"{col}{row_idx}"].value or 0
+                    if isinstance(existing_val, str):
+                        existing_val = 0
+                    sheet[f"{col}{row_idx}"] = existing_val + value
+                    print(f"[MAP-OTHER] '{desc}' -> '{other_item}' [Other category]")
+                section_stats['unmapped'] += 1
+                stats['unmapped'] += 1
+                print(f"[MAP-FAIL] '{desc}' could not be mapped to any template item.")
+        return section_stats
+
+    def group_balance_sheet_items(self, year_data: Dict) -> Dict[str, List[Dict]]:
+        """Group balance sheet items by section using refined logic and debug prints."""
+        sections = {
+            'current_assets': [],
+            'noncurrent_assets': [],
+            'current_liabilities': [],
+            'noncurrent_liabilities': [],
+            'equity': []
+        }
+        def is_parsing_artifact(desc):
+            return bool(re.match(r'^and \d{1,3}(,\d{3})* in \d{4} and \d{4}, respectively', desc.lower()))
+        for desc, value in year_data.items():
+            if self.is_total_or_net_row(desc) or is_parsing_artifact(desc):
+                continue
+            desc_lower = desc.lower()
+            # --- Refined liability grouping ---
+            if any(k in desc_lower for k in ['accounts payable', 'accrued', 'taxes payable']):
+                if any(k in desc_lower for k in ['noncurrent', 'long-term', 'long term']):
+                    print(f"[GROUP] '{desc}' -> noncurrent_liabilities (refined: explicit noncurrent)")
+                    sections['noncurrent_liabilities'].append({'description': desc, 'value': value})
+                        else:
+                    print(f"[GROUP] '{desc}' -> current_liabilities (refined: default)")
+                    sections['current_liabilities'].append({'description': desc, 'value': value})
+            elif any(k in desc_lower for k in ['liability', 'obligation', 'contingent']):
+                if any(k in desc_lower for k in ['current', 'short term']):
+                    print(f"[GROUP] '{desc}' -> current_liabilities (refined: explicit current)")
+                    sections['current_liabilities'].append({'description': desc, 'value': value})
+                            else:
+                    print(f"[GROUP] '{desc}' -> noncurrent_liabilities (refined: default)")
+                    sections['noncurrent_liabilities'].append({'description': desc, 'value': value})
+            elif any(k in desc_lower for k in ['payable', 'accrued', 'taxes payable']):
+                # fallback for any other payable/accrued
+                print(f"[GROUP] '{desc}' -> current_liabilities (fallback)")
+                sections['current_liabilities'].append({'description': desc, 'value': value})
+            elif any(k in desc_lower for k in ['cash', 'receivable', 'inventory', 'prepaid', 'margin', 'derivative', 'subchapter', 'notes', 'other current']):
+                print(f"[GROUP] '{desc}' -> current_assets")
+                sections['current_assets'].append({'description': desc, 'value': value})
+            elif any(k in desc_lower for k in ['property', 'equipment', 'goodwill', 'intangible', 'right of use', 'finance lease', 'deferred compensation', 'other noncurrent']):
+                print(f"[GROUP] '{desc}' -> noncurrent_assets")
+                sections['noncurrent_assets'].append({'description': desc, 'value': value})
+            elif any(k in desc_lower for k in ['debt', 'deferred', 'long-term', 'long term', 'noncurrent liability']):
+                print(f"[GROUP] '{desc}' -> noncurrent_liabilities")
+                sections['noncurrent_liabilities'].append({'description': desc, 'value': value})
+            elif any(k in desc_lower for k in ['stock', 'capital', 'retained', 'equity', 'noncontrolling']):
+                print(f"[GROUP] '{desc}' -> equity")
+                sections['equity'].append({'description': desc, 'value': value})
+            else:
+                print(f"[GROUP] '{desc}' -> current_assets (default)")
+                sections['current_assets'].append({'description': desc, 'value': value})
+        return sections
+
+    def group_income_statement_items(self, year_data: Dict) -> Dict[str, List[Dict]]:
+        """Group income statement items by section."""
+        sections = {
+            'revenue': [],
+            'operating_expenses': [],
+            'other_income_expense': [],
+            'tax_net_income': []
+        }
+        
+        for desc, value in year_data.items():
+            if self.is_total_or_net_row(desc):
+                continue
+            
+            desc_lower = desc.lower()
+            if any(keyword in desc_lower for keyword in ['revenue', 'sales']):
+                sections['revenue'].append({'description': desc, 'value': value})
+            elif any(keyword in desc_lower for keyword in ['cost', 'expense', 'depreciation', 'amortization']):
+                sections['operating_expenses'].append({'description': desc, 'value': value})
+            elif any(keyword in desc_lower for keyword in ['interest']):
+                sections['other_income_expense'].append({'description': desc, 'value': value})
+            elif any(keyword in desc_lower for keyword in ['tax', 'net income', 'net loss']):
+                sections['tax_net_income'].append({'description': desc, 'value': value})
+                        else:
+                sections['operating_expenses'].append({'description': desc, 'value': value})
+        
+        return sections
+
+    def group_cash_flow_items(self, year_data: Dict) -> Dict[str, List[Dict]]:
+        """Group cash flow items by section."""
+        sections = {
+            'operating_activities': [],
+            'investing_activities': [],
+            'financing_activities': [],
+            'cash_reconciliation': []
+        }
+        
+        for desc, value in year_data.items():
+            if self.is_total_or_net_row(desc):
+                continue
+            
+            desc_lower = desc.lower()
+            if any(keyword in desc_lower for keyword in ['operating', 'net income', 'depreciation', 'amortization']):
+                sections['operating_activities'].append({'description': desc, 'value': value})
+            elif any(keyword in desc_lower for keyword in ['investing', 'purchase', 'proceeds', 'acquisition']):
+                sections['investing_activities'].append({'description': desc, 'value': value})
+            elif any(keyword in desc_lower for keyword in ['financing', 'debt', 'stock', 'dividend']):
+                sections['financing_activities'].append({'description': desc, 'value': value})
+            elif any(keyword in desc_lower for keyword in ['cash', 'beginning', 'ending', 'change']):
+                sections['cash_reconciliation'].append({'description': desc, 'value': value})
+            else:
+                sections['operating_activities'].append({'description': desc, 'value': value})
+        
+        return sections
+
+    def get_other_category_for_section(self, section: str, statement_type: str) -> Optional[str]:
+        """Get the appropriate 'Other' category for a section."""
+        if statement_type == 'balance_sheet':
+            return 'Other'
+        elif statement_type == 'income_statement':
+            if section == 'operating_expenses':
+                return 'Other Operating Expenses'
+            elif section == 'other_income_expense':
+                return 'Other Income/Expense'
+        elif statement_type == 'cash_flow':
+            if section == 'operating_activities':
+                return 'Other Operating Activities'
+            elif section == 'investing_activities':
+                return 'Other Investing Activities'
+            elif section == 'financing_activities':
+                return 'Other Financing Activities'
+        return None
 
     def get_bs_row_map(self, sheet, start_row, end_row):
         """Helper to get row map for a BS section."""
@@ -2063,16 +2460,16 @@ INSTRUCTIONS:
 4. If no good match exists, return "Other"
 5. Provide a confidence score from 0.0 to 1.0
 
-IMPORTANT: Your response must be a JSON object where keys are the line item descriptions and values are [template_item_name, confidence_score, reasoning].
+CRITICAL: You must respond with ONLY valid JSON. No comments, no explanations outside the JSON structure.
 
-Example Response Format:
+REQUIRED JSON FORMAT:
 {{
   "Cash and cash equivalents": ["Cash and equivalents", 1.0, "Direct match"],
   "Trade receivables": ["Accounts Receivable", 0.9, "Synonym match"],
   "Unknown item": ["Other", 0.2, "No good match"]
 }}
 
-Your response:"""
+Your response (JSON only):"""
         
         try:
             response = requests.post(
@@ -2094,34 +2491,88 @@ Your response:"""
                 result = response.json()
                 response_text = result.get("response", "").strip()
                 
-                # Parse JSON response
-                try:
-                    import json
-                    import re
+                # Parse JSON response with multiple fallback strategies
+                mappings = self.parse_llm_json_response(response_text)
+                
+                if mappings:
+                    results = {}
+                    for desc, mapping in mappings.items():
+                        if isinstance(mapping, list) and len(mapping) >= 2:
+                            template_item = str(mapping[0]).strip()
+                            confidence = float(mapping[1])
+                            reasoning = str(mapping[2]) if len(mapping) > 2 else ""
+                            results[desc] = (template_item, confidence, f"llm_batch: {reasoning}")
                     
-                    # Find JSON object in response
-                    json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-                    if json_match:
-                        json_str = json_match.group(0)
-                        mappings = json.loads(json_str)
-                        
-                        results = {}
-                        for desc, mapping in mappings.items():
-                            if isinstance(mapping, list) and len(mapping) >= 2:
-                                template_item = str(mapping[0]).strip()
-                                confidence = float(mapping[1])
-                                reasoning = str(mapping[2]) if len(mapping) > 2 else ""
-                                results[desc] = (template_item, confidence, f"llm_batch: {reasoning}")
-                        
-                        return results
-                except Exception as e:
-                    print(f"[WARN] Failed to parse LLM batch response: {e}")
+                    return results
+                else:
+                    print(f"[WARN] Failed to parse LLM response, falling back to individual mapping")
                     return {}
             
         except Exception as e:
             print(f"[WARN] LLM batch call failed: {e}")
             return {}
         
+        return {}
+
+    def parse_llm_json_response(self, response_text: str) -> Dict:
+        """Parse LLM JSON response with multiple fallback strategies."""
+        import json
+        import re
+        
+        # Strategy 1: Try to find JSON object with regex
+        json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(0)
+            try:
+                # Clean up common JSON issues
+                json_str = re.sub(r',\s*}', '}', json_str)  # Remove trailing commas
+                json_str = re.sub(r',\s*]', ']', json_str)  # Remove trailing commas in arrays
+                json_str = re.sub(r'//.*?\n', '\n', json_str)  # Remove single-line comments
+                json_str = re.sub(r'/\*.*?\*/', '', json_str, flags=re.DOTALL)  # Remove multi-line comments
+                
+                return json.loads(json_str)
+            except json.JSONDecodeError as e:
+                print(f"[DEBUG] JSON parsing failed: {e}")
+                print(f"[DEBUG] Attempted to parse: {json_str[:200]}...")
+        
+        # Strategy 2: Try to extract individual mappings
+        print("[DEBUG] Attempting to extract individual mappings...")
+        mappings = {}
+        
+        # Look for patterns like "item": ["template", confidence, "reason"]
+        pattern = r'"([^"]+)":\s*\["([^"]+)",\s*([\d.]+)(?:,\s*"([^"]+)")?\]'
+        matches = re.findall(pattern, response_text)
+        
+        for match in matches:
+            desc, template_item, confidence, reasoning = match
+            try:
+                mappings[desc] = [template_item, float(confidence), reasoning or ""]
+            except ValueError:
+                continue
+        
+        if mappings:
+            print(f"[DEBUG] Extracted {len(mappings)} individual mappings")
+            return mappings
+        
+        # Strategy 3: Last resort - try to fix common JSON issues
+        print("[DEBUG] Attempting JSON repair...")
+        try:
+            # Remove everything before the first {
+            start_idx = response_text.find('{')
+            if start_idx != -1:
+                json_str = response_text[start_idx:]
+                
+                # Fix common issues
+                json_str = re.sub(r',\s*([}\]])', r'\1', json_str)  # Remove trailing commas
+                json_str = re.sub(r'//.*?\n', '\n', json_str)  # Remove comments
+                json_str = re.sub(r'/\*.*?\*/', '', json_str, flags=re.DOTALL)
+                
+                return json.loads(json_str)
+        except Exception as e:
+            print(f"[DEBUG] JSON repair failed: {e}")
+        
+        print(f"[DEBUG] All JSON parsing strategies failed")
+        print(f"[DEBUG] Response text: {response_text[:500]}...")
         return {}
 
     def map_section_with_batching(self, section_data: List[dict], template_items: List[str], 
@@ -2172,7 +2623,11 @@ def main():
             print(f"Specified file does not exist: {latest_file}")
             return
     else:
+<<<<<<< HEAD
     excel_files = [f for f in output_dir.glob("*.xlsx") if not f.name.startswith('~$')]
+=======
+        excel_files = [f for f in output_dir.glob("*.xlsx") if not f.name.startswith('~$')]
+>>>>>>> 4687d00199131f627a51fd90a4a41ba0b5faba04
     if not excel_files:
         print("No valid (non-temporary) Excel files found in output directory")
         return
@@ -2190,12 +2645,24 @@ def main():
         year_cols = [col for col in df.columns if col != 'Description']
         print(f"[DEBUG] Found year columns for {statement_type}: {year_cols}")
         
+        # Initialize year dictionaries
         for year in year_cols:
             extracted_data[statement_type][str(year)] = {}
+<<<<<<< HEAD
         for _, row in df.iterrows():
             desc = row['Description']
                 if pd.notna(desc) and pd.notna(row.get(year)):
                     extracted_data[statement_type][str(year)][desc] = row[year]
+=======
+        
+        # Process each row and populate all years
+        for _, row in df.iterrows():
+            desc = row['Description']
+            if pd.notna(desc):
+                for year in year_cols:
+                    if pd.notna(row.get(year)):
+                        extracted_data[statement_type][str(year)][desc] = row[year]
+>>>>>>> 4687d00199131f627a51fd90a4a41ba0b5faba04
         
         print(f"[DEBUG] Loaded {statement_type}: {len(extracted_data[statement_type])} years")
         for year, items in extracted_data[statement_type].items():

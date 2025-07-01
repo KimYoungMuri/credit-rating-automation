@@ -1,0 +1,67 @@
+{
+  "changes_in_assets_and_liabilities_consolidated": {
+    "original_description": "Total Changes in Assets and Liabilities (All Operating)",
+    "template_field": "Changes in Assets and Liabilities",
+    "section": "operating",
+    "value_2023": 687937.0,
+    "value_2024": 5060.0,
+    "confidence": 0.95,
+    "mapping_method": "section1_operating_consolidation",
+    "source_data": {
+      "item_count": 10,
+      "section": "operating"
+    }
+  },
+  "net_income_consolidated": {
+    "original_description": "Total Net Income (All Operating)",
+    "template_field": "Net Income",
+    "section": "operating",
+    "value_2023": 181940.0,
+    "value_2024": null,
+    "confidence": 0.95,
+    "mapping_method": "section1_operating_consolidation",
+    "source_data": {
+      "item_count": 2,
+      "section": "operating"
+    }
+  },
+  "capex_consolidated": {
+    "original_description": "Total CapEx (All Investing)",
+    "template_field": "CapEx",
+    "section": "investing",
+    "value_2023": 7500.0,
+    "value_2024": null,
+    "confidence": 0.9,
+    "mapping_method": "section2_investing_consolidation",
+    "source_data": {
+      "item_count": 2,
+      "section": "investing"
+    }
+  },
+  "issuance_of_stock_consolidated": {
+    "original_description": "Total Issuance of Stock (All Financing)",
+    "template_field": "Issuance of Stock",
+    "section": "financing",
+    "value_2023": 258103.0,
+    "value_2024": 31.0,
+    "confidence": 0.9,
+    "mapping_method": "section3_financing_consolidation",
+    "source_data": {
+      "item_count": 1,
+      "section": "financing"
+    }
+  },
+  "dividends_paid_consolidated": {
+    "original_description": "Total Dividends Paid (All Financing)",
+    "template_field": "Dividends Paid",
+    "section": "financing",
+    "value_2023": -58199.0,
+    "value_2024": null,
+    "confidence": 0.9,
+    "mapping_method": "section3_financing_consolidation",
+    "source_data": {
+      "item_count": 2,
+      "section": "financing"
+    }
+  }
+}

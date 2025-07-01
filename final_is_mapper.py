@@ -224,6 +224,243 @@ class FinalISMapper:
         
         return None, None, 0.0
     
+    def ask_ollama_for_classification(self, description: str) -> Tuple[Optional[str], Optional[str]]:
+        """Ask Ollama LLM to classify income statement line items"""
+        try:
+            import requests
+            
+            # Simple prompt for fast processing
+            prompt = f"""Classify this income statement item:
+
+"{description}"
+
+Choose the BEST template field and section:
+
+Template Fields:
+- Revenue (section: revenue)
+- Operating Expenses (section: operating_expenses)  
+- Depreciation (section: non_operating)
+- Amortization (section: non_operating)
+- Asset Impairments (section: non_operating)
+- Interest Expense (section: non_operating)
+- Interest Income (section: non_operating)
+- Other Income (section: non_operating)
+- Tax Expense (section: taxes)
+
+Answer format: "Field|section" (e.g., "Revenue|revenue")"""
+
+            # Call Ollama API with phi3:mini
+            response = requests.post(
+                'http://localhost:11434/api/generate',
+                json={
+                    'model': 'phi3:mini',
+                    'prompt': prompt,
+                    'stream': False,
+                    'options': {
+                        'temperature': 0.1,
+                        'num_predict': 20
+                    }
+                },
+                timeout=20  # Shorter timeout for income statement
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                ollama_response = result.get('response', '').strip()
+                
+                # Parse response: "Field|section"
+                if '|' in ollama_response:
+                    field, section = ollama_response.split('|', 1)
+                    field = field.strip()
+                    section = section.strip()
+                    
+                    # Validate field exists in our mapping
+                    if field in self.template_mappings:
+                        return field, section
+                        
+            return None, None
+            
+        except Exception as e:
+            print(f"   ⚠️ LLM classification failed: {e}")
+            return None, None
+    
+    def apply_multi_tier_fallback(self, description: str) -> Tuple[Optional[str], Optional[str], float, str]:
+        """Apply 5-tier fallback system for income statement classification"""
+        
+        # TIER 1: Enhanced regex patterns (already tried above, so skip)
+        
+        # TIER 2: Fuzzy matching against template fields (70% confidence)
+        template_field, section, confidence = self.apply_fuzzy_matching(description)
+        if template_field and confidence >= 0.7:
+            print(f"   🔄 Fuzzy match: {description[:30]}... → {template_field}")
+            return template_field, section, confidence, 'fuzzy_matching'
+        
+        # TIER 3: Keyword-based analysis (60% confidence)
+        template_field, section = self.apply_keyword_analysis(description)
+        if template_field and section:
+            print(f"   🔍 Keyword analysis: {description[:30]}... → {template_field}")
+            return template_field, section, 0.6, 'keyword_analysis'
+        
+        # TIER 4: LLM fallback with phi3:mini (70% confidence)
+        llm_field, llm_section = self.ask_ollama_for_classification(description)
+        if llm_field and llm_section:
+            print(f"   🤖 Ollama inference: {description[:30]}... → {llm_field}")
+            return llm_field, llm_section, 0.7, 'llm_fallback'
+        
+        # TIER 5: Smart income statement fallback (50% confidence)
+        smart_field, smart_section = self.smart_income_statement_fallback(description)
+        if smart_field and smart_section:
+            print(f"   🧠 Smart fallback: {description[:30]}... → {smart_field}")
+            return smart_field, smart_section, 0.5, 'smart_fallback'
+        
+        return None, None, 0.0, 'no_match'
+    
+    def apply_fuzzy_matching(self, description: str) -> Tuple[Optional[str], Optional[str], float]:
+        """Apply fuzzy string matching against known template fields"""
+        from difflib import SequenceMatcher
+        
+        desc_lower = description.lower().strip()
+        
+        # Template field patterns for fuzzy matching
+        template_patterns = {
+            'Revenue': ['revenue', 'sales', 'net sales', 'gross sales'],
+            'Operating Expenses': ['operating expenses', 'opex', 'selling expenses', 'administrative expenses'],
+            'Depreciation': ['depreciation', 'depreciation expense'],
+            'Amortization': ['amortization', 'amortization expense'],
+            'Asset Impairments': ['impairment', 'asset impairment', 'goodwill impairment'],
+            'Interest Expense': ['interest expense', 'interest cost', 'borrowing cost'],
+            'Interest Income': ['interest income', 'interest revenue'],
+            'Other Income': ['other income', 'other expense', 'miscellaneous income', 'foreign exchange'],
+            'Tax Expense': ['tax expense', 'income tax', 'tax provision']
+        }
+        
+        best_match = None
+        best_confidence = 0.0
+        
+        for template_field, patterns in template_patterns.items():
+            for pattern in patterns:
+                similarity = SequenceMatcher(None, desc_lower, pattern).ratio()
+                if similarity > best_confidence and similarity >= 0.6:  # 60% similarity threshold
+                    best_match = template_field
+                    best_confidence = similarity
+        
+        if best_match:
+            # Determine section based on template field
+            section_mapping = {
+                'Revenue': 'revenue',
+                'Operating Expenses': 'operating_expenses',
+                'Depreciation': 'non_operating',
+                'Amortization': 'non_operating',
+                'Asset Impairments': 'non_operating',
+                'Interest Expense': 'non_operating',
+                'Interest Income': 'non_operating',
+                'Other Income': 'non_operating',
+                'Tax Expense': 'taxes'
+            }
+            section = section_mapping.get(best_match, 'non_operating')
+            return best_match, section, best_confidence
+        
+        return None, None, 0.0
+    
+    def apply_keyword_analysis(self, description: str) -> Tuple[Optional[str], Optional[str]]:
+        """Apply keyword-based classification for income statement items"""
+        desc_lower = description.lower().strip()
+        
+        # Income statement specific keyword classifications
+        keyword_mappings = {
+            # Revenue indicators
+            ('Revenue', 'revenue'): [
+                'sales', 'revenue', 'income', 'proceeds', 'receipts',
+                'fees', 'charges', 'billings', 'turnover'
+            ],
+            
+            # Operating expense indicators
+            ('Operating Expenses', 'operating_expenses'): [
+                'operating', 'administrative', 'selling', 'personnel',
+                'salaries', 'wages', 'benefits', 'rent', 'utilities',
+                'professional fees', 'consulting', 'marketing'
+            ],
+            
+            # Non-operating items
+            ('Interest Expense', 'non_operating'): [
+                'interest expense', 'interest cost', 'borrowing',
+                'financing cost', 'debt service'
+            ],
+            
+            ('Interest Income', 'non_operating'): [
+                'interest income', 'interest revenue', 'investment income',
+                'dividend income'
+            ],
+            
+            ('Other Income', 'non_operating'): [
+                'other', 'miscellaneous', 'foreign', 'exchange',
+                'currency', 'gain', 'loss', 'disposal', 'extraordinary'
+            ],
+            
+            # Tax items
+            ('Tax Expense', 'taxes'): [
+                'tax', 'taxation', 'provision', 'deferred tax',
+                'current tax', 'income tax'
+            ]
+        }
+        
+        # Score each classification based on keyword matches
+        scores = {}
+        for (template_field, section), keywords in keyword_mappings.items():
+            score = 0
+            for keyword in keywords:
+                if keyword in desc_lower:
+                    score += 1
+            if score > 0:
+                scores[(template_field, section)] = score
+        
+        if scores:
+            # Return the classification with highest score
+            best_match = max(scores, key=scores.get)
+            return best_match[0], best_match[1]
+        
+        return None, None
+    
+    def smart_income_statement_fallback(self, description: str) -> Tuple[Optional[str], Optional[str]]:
+        """Smart fallback classification based on income statement context"""
+        desc_lower = description.lower().strip()
+        
+        # Common income statement patterns that might not match exact rules
+        fallback_patterns = {
+            # If it has dollar signs or mentions money, likely revenue or expense
+            ('Revenue', 'revenue'): [
+                r'\$.*(?:sales?|revenue|income)(?!\s+expense)',
+                r'(?:net|gross|total)\s+(?:sales?|revenue)',
+                r'service\s+(?:revenue|income|fees)'
+            ],
+            
+            ('Operating Expenses', 'operating_expenses'): [
+                r'(?:cost|expense)(?!.*interest)(?!.*tax)',
+                r'personnel|payroll|compensation',
+                r'general.*administrative|sg&a'
+            ],
+            
+            ('Other Income', 'non_operating'): [
+                r'foreign.*(?:exchange|currency)',
+                r'(?:gain|loss).*(?:sale|disposal)',
+                r'unusual|extraordinary|non.*recurring'
+            ],
+            
+            ('Tax Expense', 'taxes'): [
+                r'provision.*tax',
+                r'deferred.*tax',
+                r'tax.*(?:benefit|expense)'
+            ]
+        }
+        
+        for (template_field, section), patterns in fallback_patterns.items():
+            for pattern in patterns:
+                if re.search(pattern, desc_lower):
+                    return template_field, section
+        
+        # Default fallback - if nothing else matches, assume it's "Other Income"
+        return 'Other Income', 'non_operating'
+    
     def consolidate_multi_mappings(self, mapped_items: Dict[str, ISMappedValue]) -> Dict[str, ISMappedValue]:
         """Consolidate multiple items that map to the same template field"""
         consolidated = {}
@@ -364,11 +601,26 @@ class FinalISMapper:
         print("🔄 Enhanced Income Statement Processing:")
         print("-" * 50)
         
+        # Filter items with numerical values
+        items_with_numbers = []
         for item in non_total_items:
             description = item.get('description', '').strip()
             numbers = item.get('numbers', {})
             
-
+            # Check if item has actual numerical values
+            has_numbers = any(
+                value_str is not None and str(value_str).strip() 
+                for value_str in numbers.values()
+            )
+            
+            if has_numbers:
+                items_with_numbers.append(item)
+        
+        print(f"📊 Items with numerical values: {len(items_with_numbers)}")
+        
+        for item in items_with_numbers:
+            description = item.get('description', '').strip()
+            numbers = item.get('numbers', {})
             
             # Parse values (expenses will be negative in the template)
             value_2023 = None
@@ -411,17 +663,76 @@ class FinalISMapper:
                 print(f"   Values: 2023={v23}, 2024={v24}")
                 print()
             else:
-                unmapped_items.append((description, value_2023, value_2024, item))
-                print(f"❓ {description[:50]}...")
-                print(f"   → Not mapped")
+                # Apply 5-tier fallback system for unmapped items
+                template_field, section, confidence, method = self.apply_multi_tier_fallback(description)
+                
+                if template_field and section and confidence >= 0.5:
+                    mapped_value = ISMappedValue(
+                        original_description=description,
+                        template_field=template_field,
+                        section=section,
+                        value_2023=value_2023,
+                        value_2024=value_2024,
+                        confidence=confidence,
+                        mapping_method=method,
+                        source_data=item
+                    )
+                    
+                    key = f"{template_field}_{section}_{len(mapped_items)}"
+                    mapped_items[key] = mapped_value
+                    
+                    # Different emoji based on method
+                    emoji = {
+                        'fuzzy_matching': '🔄',
+                        'keyword_analysis': '🔍', 
+                        'llm_fallback': '🤖',
+                        'smart_fallback': '🧠',
+                        'consolidation_fallback': '📦'
+                    }.get(method, '✅')
+                    
+                    print(f"{emoji} {description[:50]}...")
+                    print(f"   → {template_field} (section: {section}) [{method}]")
+                    v23 = f"${value_2023:,.0f}" if value_2023 else "-"
+                    v24 = f"${value_2024:,.0f}" if value_2024 else "-"
+                    print(f"   Values: 2023={v23}, 2024={v24}")
+                    print()
+                else:
+                    unmapped_items.append((description, value_2023, value_2024, item))
+                    print(f"❓ {description[:50]}...")
+                    print(f"   → Will map to 'Other Income' in consolidation")
         
         # Step 3: Consolidate multi-mappings
         print(f"\n🔗 Consolidating multi-item mappings:")
         print("-" * 50)
         consolidated_mapped = self.consolidate_multi_mappings(mapped_items)
         
+        # Step 4: Consolidate unmapped items into "Other Income"
+        if unmapped_items:
+            print(f"\n🔧 Consolidating unmapped items into 'Other Income':")
+            print("-" * 50)
+            
+            total_2023 = sum(item[1] for item in unmapped_items if item[1] is not None)
+            total_2024 = sum(item[2] for item in unmapped_items if item[2] is not None)
+            
+            if total_2023 != 0 or total_2024 != 0:
+                consolidated_mapped["other_income_unmapped"] = ISMappedValue(
+                    original_description=f"Consolidated {len(unmapped_items)} unmapped items",
+                    template_field="Other Income",
+                    section="non_operating",
+                    value_2023=total_2023 if total_2023 != 0 else None,
+                    value_2024=total_2024 if total_2024 != 0 else None,
+                    confidence=0.5,
+                    mapping_method="consolidation_fallback",
+                    source_data={"consolidated_count": len(unmapped_items)}
+                )
+                
+                print(f"📦 Consolidated {len(unmapped_items)} unmapped items → Other Income")
+                v23 = f"${total_2023:,.0f}" if total_2023 != 0 else "-"
+                v24 = f"${total_2024:,.0f}" if total_2024 != 0 else "-"
+                print(f"   Total values: 2023={v23}, 2024={v24}")
+        
         print(f"\n📊 Final mapped items: {len(consolidated_mapped)}")
-        print(f"📊 Unmapped items: {len(unmapped_items)}")
+        print(f"📊 Unmapped items: {len(unmapped_items)} (consolidated into Other Income)")
         
         return consolidated_mapped
     

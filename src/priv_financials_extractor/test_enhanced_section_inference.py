@@ -5,7 +5,7 @@ Test Enhanced Section Inference with Position Context and Ollama Fallback
 
 import sys
 import os
-from final_kg_mapper import FinalKGMapper
+from priv_financials_extractor.final_bs_mapper import FinalKGMapper
 
 def test_section_inference():
     """Test the enhanced section inference system"""

@@ -1,0 +1,106 @@
+{
+  "changes_in_noncash_items_consolidated": {
+    "original_description": "Total Changes in noncash items (All Operating)",
+    "template_field": "Changes in noncash items",
+    "section": "operating",
+    "value_2023": 154021.0,
+    "value_2024": 158506.0,
+    "confidence": 0.95,
+    "mapping_method": "section1_operating_consolidation",
+    "source_data": {
+      "item_count": 6,
+      "section": "operating"
+    }
+  },
+  "changes_in_assets_and_liabilities_consolidated": {
+    "original_description": "Total Changes in Assets and Liabilities (All Operating)",
+    "template_field": "Changes in Assets and Liabilities",
+    "section": "operating",
+    "value_2023": -349097.0,
+    "value_2024": -40141.0,
+    "confidence": 0.95,
+    "mapping_method": "section1_operating_consolidation",
+    "source_data": {
+      "item_count": 12,
+      "section": "operating"
+    }
+  },
+  "capex_consolidated": {
+    "original_description": "Total CapEx (All Investing)",
+    "template_field": "CapEx",
+    "section": "investing",
+    "value_2023": -37713.0,
+    "value_2024": -32589.0,
+    "confidence": 0.9,
+    "mapping_method": "section2_investing_consolidation",
+    "source_data": {
+      "item_count": 5,
+      "section": "investing"
+    }
+  },
+  "proceeds_from_asset_sales_consolidated": {
+    "original_description": "Total Proceeds from asset sales (All Investing)",
+    "template_field": "Proceeds from asset sales",
+    "section": "investing",
+    "value_2023": 5985.0,
+    "value_2024": 11197.0,
+    "confidence": 0.9,
+    "mapping_method": "section2_investing_consolidation",
+    "source_data": {
+      "item_count": 3,
+      "section": "investing"
+    }
+  },
+  "retirement_of_debt_consolidated": {
+    "original_description": "Total Retirement of Debt (All Financing)",
+    "template_field": "Retirement of Debt",
+    "section": "financing",
+    "value_2023": 100984.0,
+    "value_2024": -225689.0,
+    "confidence": 0.9,
+    "mapping_method": "section3_financing_consolidation",
+    "source_data": {
+      "item_count": 9,
+      "section": "financing"
+    }
+  },
+  "issuance_of_debt_consolidated": {
+    "original_description": "Total Issuance of Debt (All Financing)",
+    "template_field": "Issuance of Debt",
+    "section": "financing",
+    "value_2023": 57081.0,
+    "value_2024": 18703.0,
+    "confidence": 0.9,
+    "mapping_method": "section3_financing_consolidation",
+    "source_data": {
+      "item_count": 1,
+      "section": "financing"
+    }
+  },
+  "issuance_of_stock_consolidated": {
+    "original_description": "Total Issuance of Stock (All Financing)",
+    "template_field": "Issuance of Stock",
+    "section": "financing",
+    "value_2023": 25.0,
+    "value_2024": 975.0,
+    "confidence": 0.9,
+    "mapping_method": "section3_financing_consolidation",
+    "source_data": {
+      "item_count": 1,
+      "section": "financing"
+    }
+  },
+  "dividends_paid_consolidated": {
+    "original_description": "Total Dividends Paid (All Financing)",
+    "template_field": "Dividends Paid",
+    "section": "financing",
+    "value_2023": -25358.0,
+    "value_2024": -29320.0,
+    "confidence": 0.9,
+    "mapping_method": "section3_financing_consolidation",
+    "source_data": {
+      "item_count": 1,
+      "section": "financing"
+    }
+  }
+}
